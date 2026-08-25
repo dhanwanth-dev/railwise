@@ -1,0 +1,39 @@
+{
+  "type": "logistic_sgd",
+  "feature_names": [
+    "is_upi",
+    "is_card",
+    "attempt_number",
+    "prior_soft_recoveries",
+    "prior_hard_declines",
+    "hours_since_last_attempt",
+    "amount_scaled",
+    "has_alt_upi",
+    "has_alt_card",
+    "bias"
+  ],
+  "clf_weights": {
+    "is_upi": 15.305586546207008,
+    "is_card": 23.661951619898183,
+    "attempt_number": -24.81241203936861,
+    "prior_soft_recoveries": 75.34652197182162,
+    "prior_hard_declines": -194.74831618470495,
+    "hours_since_last_attempt": 2.074970988257177,
+    "amount_scaled": 1.7700323644761102,
+    "has_alt_upi": -8.852212355110417,
+    "has_alt_card": 16.4628631690532,
+    "bias": 38.96753816610507
+  },
+  "reg_weights": {
+    "is_upi": NaN,
+    "is_card": NaN,
+    "attempt_number": NaN,
+    "prior_soft_recoveries": NaN,
+    "prior_hard_declines": NaN,
+    "hours_since_last_attempt": NaN,
+    "amount_scaled": NaN,
+    "has_alt_upi": NaN,
+    "has_alt_card": NaN,
+    "bias": NaN
+  }
+}
