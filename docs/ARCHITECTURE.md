@@ -2,43 +2,64 @@
 
 ## Problem framing
 
-Failed recurring payments are not one category. Soft declines (temporary, recoverable) dominate; India adds a second axis: **rail**. Card network retry heuristics applied to UPI AutoPay risk double-debit and NPCI attempt-cap violations. A blended merchant stack (UPI AutoPay + cards) needs rail as a first-class decision input.
+Failed recurring payments are not one category. Soft declines (temporary, recoverable) dominate;
+India adds two first-class axes: **rail** (UPI vs Card, with distinct NPCI/RBI rules) and
+**issuer** (SBI's 0.90% technical decline rate vs HDFC's 0.02% — same code, very different context).
 
-Razorpay already ships Intelligent Revenue-Protect and an Intelligent Retry Engine (merchant-configurable templates, WhatsApp recovery after exhaustion). Railwise deepens the **decision + compliance lattice** those surfaces still leave open under adversarial edge cases.
+Razorpay ships Intelligent Revenue-Protect (merchant-configurable retry templates, WhatsApp recovery,
+gateway rerouting on latency). Railwise deepens the problem:
 
-## Pipeline
+- **Issuer-level adaptive backoff** — cross-customer signal detection (thundering herd prevention)
+- **Mandate vitality scoring** — proactive pre-failure defense before wasting the last retry
+- **Full ISO 8583 + NPCI compliance lattice** — 13 constraint codes, RBI E-mandate 2026, CoFT
+
+## Decision Pipeline
 
 ```
-Payment failure (Razorpay-shaped)
+Payment failure (Razorpay-shaped webhook)
         │
         ▼
-  Ingest & Normalizer     ← rail becomes first-class field
+  Ingest & Normalizer       ← rail + issuer_bank + token_id + PDN status + consec. failures
         │
         ▼
-  Classification          ← rules for clear codes; model only if ambiguous
+  Classification             ← ISO 8583 hard/soft/regulatory; ambiguous → logistic model
+        │                       (issuer_bank feature: SBI do_not_honor ≠ HDFC do_not_honor)
+        ▼
+  Mandate Vitality Scorer    ← LIKELY_DEAD? proactive dunning. AT_RISK? discount recoverability.
         │
         ▼
-  Hard Constraint Gate    ← NEVER ML; priority order below
+  Hard Constraint Gate       ← NEVER ML for compliance rules
         │
    forced? ──yes──► STOP / DUNNING / RAIL_SWITCH / DELAYED_RETRY
         │ no
         ▼
-  Policy / Timing         ← choose WHEN inside legal window
+  Issuer Health Monitor      ← cross-batch SBI/Bandhan/Jio TD rate signal → adaptive backoff
         │
         ▼
-  Execution Adapter       ← simulated; bounded action enum only
+  Policy / Timing            ← choose WHEN inside legal window (issuer-aware + payday-biased)
         │
         ▼
-  Immutable Audit Log     ← full reason chain + metrics A/B
+  Execution Adapter          ← simulated; bounded action enum only
+        │
+        ▼
+  Immutable Audit Log        ← full reason chain + new compliance metrics (PDN/token/vitality)
 ```
 
-## Constraint priority order
+## Constraint Priority Order (non-negotiable)
 
-1. Kill switch / hard decline / mandate revoked / regulatory → stop or dunning-only  
-2. Attempt budget exhausted → rail-switch (never another debit)  
-3. UPI cooldown (≥20 minutes) → delayed retry  
-4. Card over-retry risk → dunning / switch  
-5. Soft recoverability + timing ranker  
+ 1. Kill switch → STOP all retries
+ 2. Mandate revoked → DUNNING only
+ 3. Token lifecycle failure (RBI CoFT) → DUNNING (re-tokenize)
+ 4. Regulatory block (RBI AFA / approval) → DUNNING
+ 5. Customer cancelled recurring (ISO R0/R1) → DUNNING
+ 6. Pre-debit notification not sent (RBI E-mandate 2026) → DUNNING
+ 7. Hard decline (ISO 41/43/54/62) → STOP
+ 8. Attempt budget exhausted (UPI: 4 total; Card: 3 total) → RAIL_SWITCH
+ 9. UPI re-present too soon (<20 min) → DELAYED_RETRY
+10. Velocity limit exhausted (ISO 61/65) → DELAYED_RETRY +24h
+11. Amount above ₹15k AFA threshold → DUNNING
+12. Issuer systemic failure (cross-customer signal) → DELAYED_RETRY +2h backoff
+13. Mandate vitality critical → DUNNING (proactive)
 
 **Compliance always beats recoverability.** That single sentence is the product thesis.
 
@@ -46,8 +67,10 @@ Payment failure (Razorpay-shaped)
 
 | Module | Responsibility |
 |---|---|
-| `engine/normalize.py` | Card vs UPI payload → `PaymentFailureEvent` |
-| `engine/classify.py` | Soft/hard/regulatory; ambiguous → logistic model |
+| `engine/normalize.py` | Card/UPI payload → `PaymentFailureEvent` (issuer, token_id, PDN status, consec. failures) |
+| `engine/classify.py` | Real ISO 8583 taxonomy; ambiguous → logistic SGD (issuer_bank feature, v2) |
+| `engine/issuer_health.py` | **NEW** Cross-customer issuer TD rate monitor → adaptive backoff (thundering herd defense) |
+| `engine/mandate_vitality.py` | **NEW** Mandate health scorer → proactive pre-failure dunning |
 | `engine/constraints.py` | Hard gate + NPCI/card ceilings |
 | `engine/policy.py` | Action + schedule inside allowed set |
 | `engine/baseline.py` | Naive static hourly retry (A/B foil) |
