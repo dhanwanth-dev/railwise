@@ -30,17 +30,19 @@ from typing import Any
 # Format: (code, iso_code_or_none, bucket, weight)
 DECLINE_POOL: list[tuple[str, str | None, str, float]] = [
     # Soft — most common by far
-    ("insufficient_funds",          "51", "soft",       28.0),  # NSF: ~28-35% of failures
-    ("bank_technical_error",        "91", "soft",       10.0),  # Issuer unavailable (TD)
-    ("issuer_unavailable",          "91", "soft",        5.0),  # SBI-heavy
-    ("gateway_timeout",             "96", "soft",        5.0),  # Network timeout
-    ("network_timeout",             "96", "soft",        4.0),
-    ("processing_error",            "06", "soft",        3.0),
-    ("temporary_failure",           "91", "soft",        3.0),
+    # Technical decline rates calibrated to Indian payment reality:
+    # Among FAILURES (not all transactions), TD is ~8-12% for high-TD banks
+    ("insufficient_funds",          "51", "soft",       35.0),  # NSF: most common
+    ("bank_technical_error",        "91", "soft",        5.0),  # Issuer TD (SBI-heavy)
+    ("issuer_unavailable",          "91", "soft",        3.0),  # SBI/Bandhan
+    ("gateway_timeout",             "96", "soft",        3.0),  # Network timeout
+    ("network_timeout",             "96", "soft",        2.5),
+    ("processing_error",            "06", "soft",        2.0),
+    ("temporary_failure",           "91", "soft",        2.0),
     ("daily_limit_exceeded",        "61", "soft",        4.0),  # UPI daily limit (velocity)
     ("exceeds_withdrawal_limit",    "65", "soft",        2.0),  # Frequency limit
     ("debit_failed",                None, "soft",        2.0),
-    ("system_error",                "96", "soft",        2.0),
+    ("system_error",                "96", "soft",        1.5),
 
     # Ambiguous — model decides (ISO 05 is the most common card code globally)
     ("do_not_honor",                "05", "ambiguous",  10.0),  # ~10-15% of card failures
@@ -118,21 +120,28 @@ def _pick_issuer(rng: random.Random) -> str:
 
 def _decline_for_issuer(rng: random.Random, issuer: str) -> tuple[str, str | None, str]:
     """
-    Adjust decline probabilities based on issuer characteristics.
-    High-TD issuers (SBI, Bandhan, Jio) produce more technical declines.
-    """
-    if issuer in ("sbi", "bandhan", "jio"):
-        # Boost technical decline weight for high-TD issuers
-        weights = []
-        for c, iso, b, w in DECLINE_POOL:
-            if b == "soft" and iso in ("91", "96"):
-                weights.append(w * 3.0)  # 3x more technical declines
-            else:
-                weights.append(w)
-        code, iso, bucket = rng.choices([(c, iso, b) for c, iso, b, _ in DECLINE_POOL], weights=weights, k=1)[0]
-    else:
-        code, iso, bucket = rng.choices(_CODES, weights=_WEIGHTS, k=1)[0]
+    Adjust decline probabilities based on issuer's known technical decline profile.
+    Uses real NPCI FY25 TD rates to calibrate the synthetic distribution.
 
+    High-TD issuers (SBI 0.90%, Bandhan 2.48%, Jio 7.23%) produce more technical declines.
+    Low-TD issuers (HDFC 0.02%, Axis 0.03%) produce almost exclusively business declines.
+    """
+    def build_weights(multiplier: float) -> list[float]:
+        return [
+            w * multiplier if (b == "soft" and iso in ("91", "96")) else w
+            for c, iso, b, w in DECLINE_POOL
+        ]
+
+    if issuer in ("sbi", "bandhan", "jio"):
+        weights = build_weights(4.0)   # 4x technical → ~25-30% of SBI failures are TD
+    elif issuer in ("icici", "yes", "indusind"):
+        weights = build_weights(1.5)   # slightly elevated
+    elif issuer in ("hdfc", "axis", "kotak", "rbl"):
+        weights = build_weights(0.15)  # very few technical declines (0.02-0.03% TD baseline)
+    else:
+        weights = _WEIGHTS
+
+    code, iso, bucket = rng.choices(_CODES, weights=weights, k=1)[0]
     return code, iso, bucket
 
 

@@ -94,10 +94,22 @@ class _IssuerWindow:
         if rate == 0.0:
             return IssuerHealthLevel.HEALTHY
         baseline = ISSUER_BASELINE_TD_RATES.get(issuer, 0.005)
-        if rate >= CRITICAL_FLOOR or rate >= baseline * CRITICAL_MULTIPLIER:
+
+        # 1. Absolute floors are the primary signal (outage regardless of baseline)
+        if rate >= CRITICAL_FLOOR:
             return IssuerHealthLevel.CRITICAL
-        if rate >= DEGRADED_FLOOR or rate >= baseline * DEGRADED_MULTIPLIER:
+        if rate >= DEGRADED_FLOOR:
             return IssuerHealthLevel.DEGRADED
+
+        # 2. Relative multiplier: only for banks with a meaningful known baseline (≥0.1%)
+        #    Ultra-low-baseline banks like HDFC (0.02%) would give false positives
+        #    even at small absolute rates if we applied the multiplier universally.
+        if baseline >= 0.001:
+            if rate >= baseline * CRITICAL_MULTIPLIER:
+                return IssuerHealthLevel.CRITICAL
+            if rate >= baseline * DEGRADED_MULTIPLIER:
+                return IssuerHealthLevel.DEGRADED
+
         return IssuerHealthLevel.HEALTHY
 
     def sample_size(self) -> int:
