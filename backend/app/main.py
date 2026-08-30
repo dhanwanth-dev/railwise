@@ -19,13 +19,15 @@ if str(ROOT) not in sys.path:
 from app.db import append_audit, get_session, init_db, save_batch  # noqa: E402
 from data.fixtures import EDGE_CASES  # noqa: E402
 from data.generator import generate_batch, write_batch  # noqa: E402
+from engine.issuer_health import get_monitor  # noqa: E402
+from engine.mandate_vitality import score_mandate_vitality  # noqa: E402
 from engine.pipeline import decide, run_batch  # noqa: E402
 from engine.schemas import Action  # noqa: E402
 
 app = FastAPI(
     title="Railwise",
-    description="Constraint-first, rail-aware revenue recovery for UPI AutoPay + cards",
-    version="1.0.0",
+    description="Constraint-first, rail-aware, issuer-intelligent revenue recovery for UPI AutoPay + cards",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -36,7 +38,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory latest batch for demo (also persisted)
 _LATEST: dict[str, Any] = {}
 _KILL_SWITCH = False
 
@@ -56,20 +57,18 @@ class BatchRequest(BaseModel):
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
-    # Ensure synthetic batch + model exist
     batch_path = ROOT / "data" / "synthetic_batch.json"
     if not batch_path.exists():
         write_batch(batch_path, 500, 42)
     model_path = ROOT / "data" / "models" / "ambiguous_clf.json"
     if not model_path.exists():
         from data.train_model import main as train_main
-
         train_main()
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "railwise", "kill_switch": _KILL_SWITCH}
+    return {"ok": True, "service": "railwise", "version": "2.0.0", "kill_switch": _KILL_SWITCH}
 
 
 @app.post("/kill-switch")
@@ -91,6 +90,9 @@ def api_batch_run(body: BatchRequest) -> dict:
     _, rw_decisions, rw_audits, rw_metrics = run_batch(events, policy="railwise", kill_switch=_KILL_SWITCH)
     _, bl_decisions, bl_audits, bl_metrics = run_batch(events, policy="baseline_static", kill_switch=False)
 
+    # Capture issuer health summary after batch (monitor populated by run_batch)
+    issuer_health_summary = get_monitor().summary()
+
     batch_id = str(uuid.uuid4())
     if body.persist:
         session = get_session()
@@ -108,14 +110,21 @@ def api_batch_run(body: BatchRequest) -> dict:
         "baseline": bl_metrics.model_dump(),
         "sample_audits": rw_audits[:25],
         "featured": _featured_from_audits(rw_audits),
+        "issuer_health": issuer_health_summary,
         "lift": {
             "soft_recovery_rate_delta": round(
                 rw_metrics.soft_recovery_rate - bl_metrics.soft_recovery_rate, 4
             ),
             "recovered_paise_delta": rw_metrics.recovered_paise - bl_metrics.recovered_paise,
-            "hard_wasted_delta": rw_metrics.hard_decline_wasted_retries
-            - bl_metrics.hard_decline_wasted_retries,
+            "hard_wasted_delta": rw_metrics.hard_decline_wasted_retries - bl_metrics.hard_decline_wasted_retries,
             "upi_violations_delta": rw_metrics.upi_cooldown_violations - bl_metrics.upi_cooldown_violations,
+            "new_compliance_protections": {
+                "pdn_blocks": rw_metrics.pdn_compliance_blocks,
+                "token_dunnings": rw_metrics.token_dunnings,
+                "mandate_vitality_dunnings": rw_metrics.mandate_vitality_dunnings,
+                "issuer_adaptive_backoffs": rw_metrics.issuer_adaptive_backoffs,
+                "customer_cancelled_stops": rw_metrics.customer_cancelled_stops,
+            },
         },
     }
     global _LATEST
@@ -126,7 +135,6 @@ def api_batch_run(body: BatchRequest) -> dict:
 @app.get("/batch/latest")
 def api_batch_latest() -> dict:
     if not _LATEST:
-        # auto-run once for demo convenience
         return api_batch_run(BatchRequest(n=500, seed=42))
     return _LATEST
 
@@ -135,16 +143,15 @@ def api_batch_latest() -> dict:
 def api_audits(
     policy: Optional[str] = None,
     action: Optional[str] = None,
+    issuer: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=500),
 ) -> dict:
     if not _LATEST:
         api_batch_run(BatchRequest(n=500, seed=42))
     audits = list(_LATEST.get("sample_audits") or [])
-    # Prefer DB if available for fuller list
     session = get_session()
     try:
         from app.db import AuditRow
-
         q = session.query(AuditRow).order_by(AuditRow.id.desc())
         if _LATEST.get("batch_id"):
             q = q.filter(AuditRow.batch_id == _LATEST["batch_id"])
@@ -157,6 +164,8 @@ def api_audits(
 
     if action:
         audits = [a for a in audits if a.get("action") == action]
+    if issuer:
+        audits = [a for a in audits if a.get("issuer_bank") == issuer]
     return {"count": len(audits), "audits": audits[:limit]}
 
 
@@ -165,7 +174,6 @@ def api_audit_one(decision_id: str) -> dict:
     session = get_session()
     try:
         from app.db import AuditRow
-
         row = session.query(AuditRow).filter(AuditRow.decision_id == decision_id).first()
         if not row:
             raise HTTPException(404, "Decision not found")
@@ -179,17 +187,15 @@ def api_edge_cases() -> dict:
     results = []
     for key, meta in EDGE_CASES.items():
         decision = decide(meta["fixture"], policy="railwise", kill_switch=_KILL_SWITCH, simulate=True)
-        results.append(
-            {
-                "id": key,
-                "title": meta["title"],
-                "notes": meta.get("notes"),
-                "expected_action": meta.get("expected_action"),
-                "expected_constraint": meta.get("expected_constraint"),
-                "fixture": meta["fixture"],
-                "decision": decision.model_dump(mode="json"),
-            }
-        )
+        results.append({
+            "id": key,
+            "title": meta["title"],
+            "notes": meta.get("notes"),
+            "expected_action": meta.get("expected_action"),
+            "expected_constraint": meta.get("expected_constraint"),
+            "fixture": meta["fixture"],
+            "decision": decision.model_dump(mode="json"),
+        })
     return {"edge_cases": results}
 
 
@@ -206,6 +212,53 @@ def api_edge_case(case_id: str) -> dict:
         "fixture": meta["fixture"],
         "decision": decision.model_dump(mode="json"),
         "featured": case_id == "upi_budget_exhausted_rail_switch",
+    }
+
+
+@app.get("/issuer-health")
+def api_issuer_health() -> dict:
+    """
+    Cross-customer issuer health summary from the most recent batch run.
+    Shows per-issuer technical decline rates, health levels, and adaptive backoff durations.
+    Empty if no batch has run yet.
+    """
+    if not _LATEST:
+        return {"message": "No batch run yet — run POST /batch/run first", "issuers": {}}
+    return {
+        "batch_id": _LATEST.get("batch_id"),
+        "issuers": _LATEST.get("issuer_health", {}),
+    }
+
+
+@app.post("/mandate-vitality")
+def api_mandate_vitality(body: dict) -> dict:
+    """
+    Score the vitality of a mandate based on its failure history.
+    POST body: same shape as /decide event.
+    Returns vitality level, raw score, and contributing factors.
+    """
+    from engine.normalize import normalize_raw
+    event = normalize_raw(body)
+    level, score, reasons = score_mandate_vitality(event)
+    return {
+        "payment_id": event.payment_id,
+        "mandate_vitality_level": level.value,
+        "vitality_score": score,
+        "score_interpretation": {
+            "0-2.5": "healthy — retry is worthwhile",
+            "2.5-5": "at_risk — downweight recoverability",
+            "5-10": "likely_dead — proactive dunning > wasted retry",
+        }[
+            "0-2.5" if score < 2.5 else ("2.5-5" if score < 5.0 else "5-10")
+        ],
+        "contributing_factors": reasons,
+        "inputs": {
+            "consecutive_failures": event.consecutive_failures,
+            "last_successful_debit_days_ago": event.last_successful_debit_days_ago,
+            "prior_hard_declines": event.prior_hard_declines,
+            "prior_soft_recoveries": event.prior_soft_recoveries,
+            "attempt_number": event.attempt_number,
+        },
     }
 
 

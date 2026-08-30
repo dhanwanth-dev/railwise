@@ -1,5 +1,6 @@
 {
   "type": "logistic_sgd",
+  "version": "2.0",
   "feature_names": [
     "is_upi",
     "is_card",
@@ -10,19 +11,29 @@
     "amount_scaled",
     "has_alt_upi",
     "has_alt_card",
+    "consecutive_failures",
+    "issuer_is_sbi",
+    "issuer_is_bandhan",
+    "issuer_is_jio",
+    "issuer_is_hdfc",
     "bias"
   ],
   "clf_weights": {
-    "is_upi": 15.305586546207008,
-    "is_card": 23.661951619898183,
-    "attempt_number": -24.81241203936861,
-    "prior_soft_recoveries": 75.34652197182162,
-    "prior_hard_declines": -194.74831618470495,
-    "hours_since_last_attempt": 2.074970988257177,
-    "amount_scaled": 1.7700323644761102,
-    "has_alt_upi": -8.852212355110417,
-    "has_alt_card": 16.4628631690532,
-    "bias": 38.96753816610507
+    "is_upi": 0.6136217641481347,
+    "is_card": 1.3286168362273056,
+    "attempt_number": -3.3967211804112893,
+    "prior_soft_recoveries": 12.153246048253328,
+    "prior_hard_declines": -22.539807280397007,
+    "hours_since_last_attempt": 0.4432171497822627,
+    "amount_scaled": 0.15352983563860875,
+    "has_alt_upi": -0.7737214089166814,
+    "has_alt_card": 0.271123440840942,
+    "consecutive_failures": -1.9989967158004474,
+    "issuer_is_sbi": 8.290423213159125,
+    "issuer_is_bandhan": 3.1773720550708715,
+    "issuer_is_jio": 1.9442697293195896,
+    "issuer_is_hdfc": -0.8704361922855406,
+    "bias": 1.3260870422670277
   },
   "reg_weights": {
     "is_upi": NaN,
@@ -34,6 +45,11 @@
     "amount_scaled": NaN,
     "has_alt_upi": NaN,
     "has_alt_card": NaN,
+    "consecutive_failures": NaN,
+    "issuer_is_sbi": NaN,
+    "issuer_is_bandhan": NaN,
+    "issuer_is_jio": NaN,
+    "issuer_is_hdfc": NaN,
     "bias": NaN
   }
 }

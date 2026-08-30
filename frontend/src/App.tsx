@@ -13,15 +13,32 @@ type Metrics = {
   upi_cooldown_violations: number
   audit_coverage_pct: number
   action_counts: Record<string, number>
+  pdn_compliance_blocks?: number
+  token_dunnings?: number
+  issuer_adaptive_backoffs?: number
+  mandate_vitality_dunnings?: number
+  customer_cancelled_stops?: number
+}
+
+type IssuerHealthEntry = {
+  td_rate: number
+  health: string
+  baseline_td_rate: number
+  multiplier_over_baseline: number
+  sample_size: number
+  backoff_minutes: number
 }
 
 type Audit = {
   decision_id: string
   payment_id: string
   rail: string
+  issuer_bank?: string
   decline_code: string
+  decline_iso_code?: string
   amount_paise: number
   attempt_number: number
+  consecutive_failures?: number
   action: string
   decline_kind: string
   recoverability: number
@@ -34,6 +51,8 @@ type Audit = {
   recovered_amount_paise: number
   delay_minutes?: number
   target_rail?: string | null
+  issuer_health_level?: string
+  mandate_vitality_level?: string
 }
 
 type BatchResult = {
@@ -42,11 +61,19 @@ type BatchResult = {
   baseline: Metrics
   sample_audits: Audit[]
   featured?: Audit | null
+  issuer_health?: Record<string, IssuerHealthEntry>
   lift: {
     soft_recovery_rate_delta: number
     recovered_paise_delta: number
     hard_wasted_delta: number
     upi_violations_delta: number
+    new_compliance_protections?: {
+      pdn_blocks: number
+      token_dunnings: number
+      mandate_vitality_dunnings: number
+      issuer_adaptive_backoffs: number
+      customer_cancelled_stops: number
+    }
   }
 }
 
@@ -160,8 +187,8 @@ export default function App() {
           Rail<span>wise</span>
         </h1>
         <p className="tagline">
-          A rail-aware recovery decision engine for UPI AutoPay and cards. Compliance ceilings beat
-          recoverability scores — every edge case has a tested priority order and an audit trail.
+          Rail-aware · issuer-intelligent · constraint-first revenue recovery for UPI AutoPay and cards.
+          Real NPCI/RBI compliance, issuer health monitoring, mandate vitality scoring — compliance ceilings always beat recoverability scores.
         </p>
         <div className="cta-row">
           <button className="btn btn-primary" disabled={loading} onClick={() => runBatch(500)}>
@@ -202,6 +229,52 @@ export default function App() {
             <div className="value">{batch.railwise.upi_cooldown_violations}</div>
             <div className="delta">Baseline {batch.baseline.upi_cooldown_violations} · audit {batch.railwise.audit_coverage_pct}%</div>
           </div>
+          <div className="metric">
+            <div className="label">PDN compliance blocks</div>
+            <div className="value">{batch.railwise.pdn_compliance_blocks ?? 0}</div>
+            <div className="delta">RBI e-mandate: 24h pre-debit notification required</div>
+          </div>
+          <div className="metric">
+            <div className="label">Token lifecycle dunnings</div>
+            <div className="value">{batch.railwise.token_dunnings ?? 0}</div>
+            <div className="delta">RBI CoFT: card token expired → re-tokenize</div>
+          </div>
+          <div className="metric">
+            <div className="label">Mandate vitality dunnings</div>
+            <div className="value">{batch.railwise.mandate_vitality_dunnings ?? 0}</div>
+            <div className="delta">Proactive: mandate health critical before retry</div>
+          </div>
+          <div className="metric">
+            <div className="label">Issuer adaptive backoffs</div>
+            <div className="value">{batch.railwise.issuer_adaptive_backoffs ?? 0}</div>
+            <div className="delta">Cross-customer systemic issuer failure detected</div>
+          </div>
+        </section>
+      )}
+
+      {batch?.issuer_health && Object.keys(batch.issuer_health).length > 0 && (
+        <section className="metrics" style={{ marginTop: 0 }}>
+          <div style={{ width: '100%', marginBottom: 8 }}>
+            <strong style={{ color: 'var(--accent)' }}>Issuer Health Monitor</strong>
+            <span style={{ marginLeft: 12, color: 'var(--muted)', fontSize: '0.85rem' }}>
+              Cross-customer TD rates from current batch · adaptive backoff triggers at CRITICAL
+            </span>
+          </div>
+          {Object.entries(batch.issuer_health).map(([bank, info]) => (
+            <div key={bank} className="metric" style={{ minWidth: 120 }}>
+              <div className="label">{bank.toUpperCase()}</div>
+              <div className="value" style={{
+                color: info.health === 'critical' ? '#ef4444' : info.health === 'degraded' ? '#f59e0b' : '#10b981',
+                fontSize: '1rem'
+              }}>
+                {info.health}
+              </div>
+              <div className="delta">
+                TD {(info.td_rate * 100).toFixed(1)}% · {info.multiplier_over_baseline}x baseline
+                {info.backoff_minutes > 0 ? ` · backoff ${info.backoff_minutes}m` : ''}
+              </div>
+            </div>
+          ))}
         </section>
       )}
 
@@ -263,12 +336,15 @@ export default function App() {
                 >
                   <div className="row">
                     <strong>
-                      {a.rail.toUpperCase()} · {a.decline_code}
+                      {a.rail.toUpperCase()} · {a.issuer_bank?.toUpperCase() || ''} · {a.decline_code}
                     </strong>
                     <span className={`badge ${a.action}`}>{a.action}</span>
                   </div>
                   <div className="muted">
                     {a.payment_id} · attempt {a.attempt_number} · {inr(a.amount_paise)}
+                    {a.mandate_vitality_level && a.mandate_vitality_level !== 'healthy'
+                      ? ` · vitality:${a.mandate_vitality_level}`
+                      : ''}
                   </div>
                 </button>
               ))}
@@ -286,9 +362,39 @@ export default function App() {
             <div className="trace">
               <div className="trace-step" style={{ animationDelay: '0ms' }}>
                 <strong>Input</strong>
-                {selected.rail} · {selected.decline_code} · attempt {selected.attempt_number} ·{' '}
-                {inr(selected.amount_paise)} · kind {selected.decline_kind}
+                {selected.rail.toUpperCase()} · {selected.issuer_bank?.toUpperCase() || '?'} ·{' '}
+                {selected.decline_code}{selected.decline_iso_code ? ` (ISO ${selected.decline_iso_code})` : ''} ·
+                attempt {selected.attempt_number}
+                {(selected.consecutive_failures ?? 0) > 0 ? ` · ${selected.consecutive_failures} consec. fails` : ''} ·{' '}
+                {inr(selected.amount_paise)}
               </div>
+              {(selected.issuer_health_level || selected.mandate_vitality_level) && (
+                <div className="trace-step" style={{ animationDelay: '20ms' }}>
+                  <strong>Defensive AI signals</strong>
+                  {selected.issuer_health_level && (
+                    <span style={{ marginRight: 12 }}>
+                      Issuer health:{' '}
+                      <span style={{
+                        color: selected.issuer_health_level === 'critical' ? '#ef4444' :
+                          selected.issuer_health_level === 'degraded' ? '#f59e0b' : '#10b981'
+                      }}>
+                        {selected.issuer_health_level}
+                      </span>
+                    </span>
+                  )}
+                  {selected.mandate_vitality_level && (
+                    <span>
+                      Mandate vitality:{' '}
+                      <span style={{
+                        color: selected.mandate_vitality_level === 'likely_dead' ? '#ef4444' :
+                          selected.mandate_vitality_level === 'at_risk' ? '#f59e0b' : '#10b981'
+                      }}>
+                        {selected.mandate_vitality_level}
+                      </span>
+                    </span>
+                  )}
+                </div>
+              )}
               <div className="trace-step" style={{ animationDelay: '40ms' }}>
                 <strong>Classification</strong>
                 recoverability {selected.recoverability?.toFixed?.(2) ?? selected.recoverability} · source{' '}
@@ -351,9 +457,12 @@ function edgeDecisionToAudit(ec: EdgeCase): Audit {
     decision_id: d.decision_id,
     payment_id: d.payment_id,
     rail: fixture?.method || 'card',
+    issuer_bank: (fixture as Record<string, unknown>)?.issuer_bank as string | undefined,
     decline_code: fixture?.error?.code || 'unknown',
+    decline_iso_code: (fixture?.error as Record<string, unknown>)?.iso_code as string | undefined,
     amount_paise: fixture?.amount || 0,
     attempt_number: fixture?.attempt_number || 1,
+    consecutive_failures: (fixture as Record<string, unknown>)?.consecutive_failures as number | undefined,
     action: d.action,
     decline_kind: d.classification?.decline_kind || 'soft',
     recoverability: d.classification?.recoverability ?? 0,
@@ -366,5 +475,7 @@ function edgeDecisionToAudit(ec: EdgeCase): Audit {
     recovered_amount_paise: d.recovered_amount_paise || 0,
     delay_minutes: d.delay_minutes,
     target_rail: d.target_rail,
+    issuer_health_level: (d as Record<string, unknown>)?.issuer_health_level as string | undefined,
+    mandate_vitality_level: (d as Record<string, unknown>)?.mandate_vitality_level as string | undefined,
   }
 }
