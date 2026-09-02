@@ -167,44 +167,50 @@ def evaluate_model(bundle: dict, samples: list[dict]) -> dict[str, float]:
     }
 
 
-def main() -> None:
-    rng = random.Random(7)
-    n_train = 3000
-    n_test = 600
-
-    print(f"Generating {n_train} training + {n_test} test samples...")
+def run_training(*, train_seed: int = 7, n_train: int = 3000, n_test: int = 600) -> dict:
+    """Train model and return metrics + top weights (for API / live UI)."""
+    rng = random.Random(train_seed)
     all_samples = [_make_sample(rng) for _ in range(n_train + n_test)]
     train_samples = all_samples[:n_train]
     test_samples = all_samples[n_train:]
 
-    soft_count = sum(s["soft"] for s in train_samples)
-    print(f"  Training: {soft_count} soft ({soft_count/n_train:.1%}) / "
-          f"{n_train - soft_count} hard ({(n_train - soft_count)/n_train:.1%})")
-
-    print(f"\nTraining logistic model ({len(FEATURE_NAMES)} features, 60 epochs)...")
     bundle = train_ambiguous_model(train_samples)
-
-    print("\n── Evaluation on held-out test set ──")
     metrics = evaluate_model(bundle, test_samples)
-    print(f"  Accuracy:          {metrics['accuracy']:.1%}")
-    print(f"  Soft recall:       {metrics['soft_recall']:.1%}  (how many soft declines correctly classified)")
-    print(f"  Hard recall:       {metrics['hard_recall']:.1%}  (how many hard declines correctly classified)")
-    print(f"  Avg recov (soft):  {metrics['avg_recov_soft']:.3f}  (should be >0.45)")
-    print(f"  Avg recov (hard):  {metrics['avg_recov_hard']:.3f}  (should be <0.20)")
-    print(f"\n  Samples: {metrics['n_samples']} ({metrics['n_soft']} soft / {metrics['n_hard']} hard)")
 
-    print("\n── Top 5 feature weights (classifier) ──")
     clf_w = bundle["clf_weights"]
-    sorted_weights = sorted(clf_w.items(), key=lambda x: abs(x[1]), reverse=True)
-    for feat, w in sorted_weights[:5]:
-        direction = "→ soft" if w > 0 else "→ hard"
-        print(f"  {feat:<35} {w:+.4f}  {direction}")
+    top_weights = sorted(clf_w.items(), key=lambda x: abs(x[1]), reverse=True)[:8]
+    feature_weights = [
+        {"feature": feat, "weight": round(w, 4), "direction": "soft" if w > 0 else "hard"}
+        for feat, w in top_weights if feat != "bias"
+    ]
 
-    print(f"\nModel saved to data/models/ambiguous_clf.json")
+    return {
+        "train_seed": train_seed,
+        "n_train": n_train,
+        "n_test": n_test,
+        "metrics": metrics,
+        "feature_weights": feature_weights,
+        "model_path": str(ROOT / "data" / "models" / "ambiguous_clf.json"),
+        "quality_passed": metrics["accuracy"] >= 0.72 and metrics["hard_recall"] >= 0.60,
+    }
 
-    # Validate minimum quality bar
-    assert metrics["accuracy"] >= 0.72, f"Model accuracy {metrics['accuracy']:.1%} below 72% threshold"
-    assert metrics["hard_recall"] >= 0.60, f"Hard recall {metrics['hard_recall']:.1%} below 60% threshold (risk of wasted retries)"
+
+def main() -> None:
+    result = run_training()
+    metrics = result["metrics"]
+    print(f"Generating {result['n_train']} training + {result['n_test']} test samples...")
+    print(f"\n── Evaluation on held-out test set ──")
+    print(f"  Accuracy:          {metrics['accuracy']:.1%}")
+    print(f"  Soft recall:       {metrics['soft_recall']:.1%}")
+    print(f"  Hard recall:       {metrics['hard_recall']:.1%}")
+    print(f"  Avg recov (soft):  {metrics['avg_recov_soft']:.3f}")
+    print(f"  Avg recov (hard):  {metrics['avg_recov_hard']:.3f}")
+    print(f"\n  Samples: {metrics['n_samples']} ({metrics['n_soft']} soft / {metrics['n_hard']} hard)")
+    print("\n── Top feature weights ──")
+    for fw in result["feature_weights"][:5]:
+        print(f"  {fw['feature']:<35} {fw['weight']:+.4f}  → {fw['direction']}")
+    print(f"\nModel saved to {result['model_path']}")
+    assert result["quality_passed"]
     print("\n✓ Quality thresholds passed (accuracy ≥ 72%, hard recall ≥ 60%)")
 
 
