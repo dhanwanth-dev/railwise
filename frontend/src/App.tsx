@@ -1,32 +1,21 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import './App.css'
 
+const API = '/api'
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
 type Metrics = {
-  policy_name: string
-  total_failures: number
-  soft_failures: number
-  hard_failures: number
-  recovered_count: number
-  recovered_paise: number
   soft_recovery_rate: number
+  recovered_paise: number
   hard_decline_wasted_retries: number
   upi_cooldown_violations: number
   audit_coverage_pct: number
-  action_counts: Record<string, number>
   pdn_compliance_blocks?: number
   token_dunnings?: number
   issuer_adaptive_backoffs?: number
   mandate_vitality_dunnings?: number
-  customer_cancelled_stops?: number
-}
-
-type IssuerHealthEntry = {
-  td_rate: number
-  health: string
-  baseline_td_rate: number
-  multiplier_over_baseline: number
-  sample_size: number
-  backoff_minutes: number
+  action_counts?: Record<string, number>
 }
 
 type Audit = {
@@ -38,444 +27,607 @@ type Audit = {
   decline_iso_code?: string
   amount_paise: number
   attempt_number: number
-  consecutive_failures?: number
   action: string
   decline_kind: string
   recoverability: number
   classification_source: string
-  feature_importance?: Record<string, number>
   constraint_hits: Array<{ code: string; message: string }>
   reason_chain: string[]
-  policy_name: string
   execution_result?: string
-  recovered_amount_paise: number
-  delay_minutes?: number
-  target_rail?: string | null
   issuer_health_level?: string
   mandate_vitality_level?: string
+  feature_importance?: Record<string, number>
 }
 
 type BatchResult = {
-  batch_id: string
   railwise: Metrics
   baseline: Metrics
   sample_audits: Audit[]
-  featured?: Audit | null
-  issuer_health?: Record<string, IssuerHealthEntry>
-  lift: {
-    soft_recovery_rate_delta: number
-    recovered_paise_delta: number
-    hard_wasted_delta: number
-    upi_violations_delta: number
-    new_compliance_protections?: {
-      pdn_blocks: number
-      token_dunnings: number
-      mandate_vitality_dunnings: number
-      issuer_adaptive_backoffs: number
-      customer_cancelled_stops: number
-    }
+  issuer_health?: Record<string, { health: string; td_rate: number; sample_size: number }>
+  lift: { soft_recovery_rate_delta: number; recovered_paise_delta: number }
+}
+
+type StabilityResult = {
+  n_seeds: number
+  seeds: Array<{ seed: number; soft_delta_pp: number; railwise_soft_recovery: number; recovered_delta_paise: number }>
+  summary: {
+    railwise_wins_soft_rate: number
+    avg_soft_delta_pp: number
+    std_soft_delta_pp: number
+    railwise_soft_recovery_mean: number
+    railwise_soft_recovery_std: number
+    zero_hard_wasted_all_seeds: boolean
+    zero_upi_violations_all_seeds: boolean
   }
+}
+
+type TrainingResult = {
+  metrics: { accuracy: number; soft_recall: number; hard_recall: number }
+  feature_weights: Array<{ feature: string; weight: number; direction: string }>
+  audit_trail: Array<{ step: string; detail: string }>
+  quality_passed: boolean
+  training_stability?: { runs: Array<{ train_seed: number; accuracy: number }>; summary: { accuracy_mean: number; accuracy_std: number } }
 }
 
 type EdgeCase = {
   id: string
   title: string
   notes: string
-  fixture: {
-    method?: string
-    error?: { code?: string }
-    amount?: number
-    attempt_number?: number
-  }
-  decision: {
-    decision_id: string
-    payment_id: string
-    action: string
-    classification: {
-      decline_kind: string
-      recoverability: number
-      source: string
-      feature_importance?: Record<string, number>
-    }
-    constraint_hits: Array<{ code: string; message: string }>
-    reason_chain: string[]
-    policy_name: string
-    execution_result?: string
-    recovered_amount_paise: number
-    delay_minutes?: number
-    target_rail?: string | null
-  }
+  fixture: Record<string, unknown>
+  decision: { action: string; classification: { recoverability: number; source: string } }
 }
 
-const API = '/api'
+type SandboxCompare = {
+  full_railwise: { action: string; classification: { recoverability: number; source: string }; constraint_hits: Array<{ code: string }>; reason_chain: string[] }
+  your_config: { action: string; classification: { recoverability: number; source: string }; constraint_hits: Array<{ code: string }>; reason_chain: string[] }
+  action_changed: boolean
+  diffs: { action: { full: string; custom: string }; recoverability: { full: number; custom: number } }
+}
+
+type AblationResult = {
+  variants: Array<{ variant: string; metrics: Metrics }>
+  comparisons: Array<{ variant: string; vs_full: Record<string, number> }>
+}
+
+type View = 'overview' | 'sandbox' | 'stability' | 'model' | 'edges'
+
+type Toggles = {
+  use_ml_model: boolean
+  use_compliance_blocks: boolean
+  use_issuer_health: boolean
+  use_mandate_vitality: boolean
+  use_timing_ai: boolean
+}
+
+const DEFAULT_TOGGLES: Toggles = {
+  use_ml_model: true,
+  use_compliance_blocks: true,
+  use_issuer_health: true,
+  use_mandate_vitality: true,
+  use_timing_ai: true,
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function inr(paise: number) {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: 0,
-  }).format(paise / 100)
+  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(paise / 100)
 }
 
 function pct(n: number) {
   return `${(n * 100).toFixed(1)}%`
 }
 
+function actionClass(action: string) {
+  return `action-badge action-${action}`
+}
+
+// ── App ──────────────────────────────────────────────────────────────────────
+
+function hasValidTraining(t: TrainingResult | null | undefined): t is TrainingResult {
+  return !!(t && t.metrics && typeof t.metrics.accuracy === 'number')
+}
+
 export default function App() {
+  const [view, setView] = useState<View>('overview')
   const [batch, setBatch] = useState<BatchResult | null>(null)
+  const [stability, setStability] = useState<StabilityResult | null>(null)
+  const [training, setTraining] = useState<TrainingResult | null>(null)
+  const [ablation, setAblation] = useState<AblationResult | null>(null)
   const [edgeCases, setEdgeCases] = useState<EdgeCase[]>([])
-  const [loading, setLoading] = useState(false)
-  const [tab, setTab] = useState<'audits' | 'edges'>('edges')
-  const [selected, setSelected] = useState<Audit | null>(null)
+  const [selectedEdge, setSelectedEdge] = useState<EdgeCase | null>(null)
+  const [sandboxResult, setSandboxResult] = useState<SandboxCompare | null>(null)
+  const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES)
+  const [loading, setLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-
-  async function loadEdges() {
-    const res = await fetch(`${API}/edge-cases`)
-    const data = await res.json()
-    setEdgeCases(data.edge_cases || [])
-    const featured = (data.edge_cases || []).find((e: EdgeCase) => e.id === 'upi_budget_exhausted_rail_switch')
-    if (featured) {
-      setSelected(edgeDecisionToAudit(featured))
-    }
-  }
-
-  async function runBatch(n = 500) {
-    setLoading(true)
-    setError(null)
-    try {
-      const res = await fetch(`${API}/batch/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ n, seed: 42, persist: true }),
-      })
-      if (!res.ok) throw new Error(`Batch failed (${res.status})`)
-      const data: BatchResult = await res.json()
-      setBatch(data)
-      setTab('audits')
-      if (data.featured) setSelected(data.featured)
-      else if (data.sample_audits?.[0]) setSelected(data.sample_audits[0])
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to run batch')
-    } finally {
-      setLoading(false)
-    }
-  }
+  const [aiUsage, setAiUsage] = useState<Array<{ name: string; uses_ai: boolean; why: string }>>([])
 
   useEffect(() => {
-    loadEdges().catch(() => setError('API offline — start backend on :8000'))
-    fetch(`${API}/batch/latest`)
+    fetch(`${API}/edge-cases`).then((r) => r.json()).then((d) => setEdgeCases(d.edge_cases || [])).catch(() => {})
+    fetch(`${API}/batch/latest`).then((r) => r.json()).then((d) => d?.railwise && setBatch(d)).catch(() => {})
+    fetch(`${API}/ai/usage`).then((r) => r.json()).then((d) => setAiUsage(d.layers || [])).catch(() => {})
+    fetch(`${API}/model/training/latest`)
       .then((r) => r.json())
-      .then((data: BatchResult) => {
-        if (data?.railwise) {
-          setBatch(data)
-          if (data.featured) setSelected(data.featured)
-        }
-      })
-      .catch(() => undefined)
+      .then((d) => { if (hasValidTraining(d)) setTraining(d) })
+      .catch(() => {})
   }, [])
 
-  const reasonSteps = useMemo(() => selected?.reason_chain || [], [selected])
+  useEffect(() => {
+    if (selectedEdge && view === 'sandbox') {
+      testSandbox(selectedEdge.fixture)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toggles])
+
+  async function runBatch() {
+    setLoading('batch')
+    setError(null)
+    try {
+      const res = await fetch(`${API}/batch/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ n: 500, seed: 2025 }) })
+      if (!res.ok) throw new Error('Batch failed')
+      setBatch(await res.json())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error')
+    } finally {
+      setLoading(null)
+    }
+  }
+
+  async function runStability() {
+    setLoading('stability')
+    setError(null)
+    try {
+      const res = await fetch(`${API}/analytics/stability`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ n_seeds: 30, batch_size: 500 }) })
+      setStability(await res.json())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error')
+    } finally {
+      setLoading(null)
+    }
+  }
+
+  async function runTraining(withStability = true) {
+    setLoading('train')
+    setError(null)
+    try {
+      const res = await fetch(`${API}/model/train`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ train_seed: 7, n_train: 3000, n_test: 600, stability_runs: withStability ? 5 : 0 }),
+      })
+      if (!res.ok) {
+        const err = await res.text()
+        throw new Error(err || `Training failed (${res.status})`)
+      }
+      const data = await res.json()
+      if (!hasValidTraining(data)) throw new Error('Training returned invalid metrics')
+      setTraining(data)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Training failed — is backend running on :8000?')
+    } finally {
+      setLoading(null)
+    }
+  }
+
+  async function runAblation() {
+    setLoading('ablation')
+    try {
+      const res = await fetch(`${API}/analytics/ablation`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ batch_size: 200, seed: 42 }) })
+      setAblation(await res.json())
+    } finally {
+      setLoading(null)
+    }
+  }
+
+  async function testSandbox(fixture: Record<string, unknown>) {
+    setLoading('sandbox')
+    try {
+      const res = await fetch(`${API}/sandbox/compare`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event: fixture, ...toggles, compare_all_variants: false }),
+      })
+      setSandboxResult(await res.json())
+    } finally {
+      setLoading(null)
+    }
+  }
+
+  function selectEdge(ec: EdgeCase) {
+    setSelectedEdge(ec)
+    testSandbox(ec.fixture)
+  }
+
+  function toggle(key: keyof Toggles) {
+    setToggles((t) => ({ ...t, [key]: !t[key] }))
+  }
 
   return (
-    <div className="app">
-      <header className="hero">
-        <p className="pill">
-          <span className="dot" />
-          Track 03 · AI Revenue Recovery · constraint-first
-        </p>
-        <h1 className="brand">
-          Rail<span>wise</span>
-        </h1>
-        <p className="tagline">
-          Rail-aware · issuer-intelligent · constraint-first revenue recovery for UPI AutoPay and cards.
-          Real NPCI/RBI compliance, issuer health monitoring, mandate vitality scoring — compliance ceilings always beat recoverability scores.
-        </p>
-        <div className="cta-row">
-          <button className="btn btn-primary" disabled={loading} onClick={() => runBatch(500)}>
-            {loading ? 'Running batch…' : 'Run 500-failure A/B batch'}
-          </button>
-          <button className="btn btn-ghost" onClick={() => setTab('edges')}>
-            Edge-case gallery
-          </button>
+    <div className="dashboard">
+      {/* Sidebar */}
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <span className="brand-icon">◈</span>
+          <div>
+            <div className="brand-name">Railwise</div>
+            <div className="brand-sub">Recovery Control Panel</div>
+          </div>
         </div>
-        {error && <p className="empty">{error}</p>}
-      </header>
-
-      {batch && (
-        <section className="metrics">
-          <div className="metric">
-            <div className="label">Soft recovery (Railwise)</div>
-            <div className="value">{pct(batch.railwise.soft_recovery_rate)}</div>
-            <div className="delta">
-              vs baseline {pct(batch.baseline.soft_recovery_rate)} (
-              {batch.lift.soft_recovery_rate_delta >= 0 ? '+' : ''}
-              {pct(batch.lift.soft_recovery_rate_delta)})
-            </div>
-          </div>
-          <div className="metric">
-            <div className="label">₹ recovered lift</div>
-            <div className="value">{inr(Math.max(0, batch.lift.recovered_paise_delta))}</div>
-            <div className="delta">
-              Railwise {inr(batch.railwise.recovered_paise)} · Baseline {inr(batch.baseline.recovered_paise)}
-            </div>
-          </div>
-          <div className="metric">
-            <div className="label">Hard-decline wasted retries</div>
-            <div className="value">{batch.railwise.hard_decline_wasted_retries}</div>
-            <div className="delta">Baseline wasted {batch.baseline.hard_decline_wasted_retries}</div>
-          </div>
-          <div className={`metric ${batch.railwise.upi_cooldown_violations ? 'warn' : ''}`}>
-            <div className="label">UPI cooldown violations</div>
-            <div className="value">{batch.railwise.upi_cooldown_violations}</div>
-            <div className="delta">Baseline {batch.baseline.upi_cooldown_violations} · audit {batch.railwise.audit_coverage_pct}%</div>
-          </div>
-          <div className="metric">
-            <div className="label">PDN compliance blocks</div>
-            <div className="value">{batch.railwise.pdn_compliance_blocks ?? 0}</div>
-            <div className="delta">RBI e-mandate: 24h pre-debit notification required</div>
-          </div>
-          <div className="metric">
-            <div className="label">Token lifecycle dunnings</div>
-            <div className="value">{batch.railwise.token_dunnings ?? 0}</div>
-            <div className="delta">RBI CoFT: card token expired → re-tokenize</div>
-          </div>
-          <div className="metric">
-            <div className="label">Mandate vitality dunnings</div>
-            <div className="value">{batch.railwise.mandate_vitality_dunnings ?? 0}</div>
-            <div className="delta">Proactive: mandate health critical before retry</div>
-          </div>
-          <div className="metric">
-            <div className="label">Issuer adaptive backoffs</div>
-            <div className="value">{batch.railwise.issuer_adaptive_backoffs ?? 0}</div>
-            <div className="delta">Cross-customer systemic issuer failure detected</div>
-          </div>
-        </section>
-      )}
-
-      {batch?.issuer_health && Object.keys(batch.issuer_health).length > 0 && (
-        <section className="metrics" style={{ marginTop: 0 }}>
-          <div style={{ width: '100%', marginBottom: 8 }}>
-            <strong style={{ color: 'var(--accent)' }}>Issuer Health Monitor</strong>
-            <span style={{ marginLeft: 12, color: 'var(--muted)', fontSize: '0.85rem' }}>
-              Cross-customer TD rates from current batch · adaptive backoff triggers at CRITICAL
-            </span>
-          </div>
-          {Object.entries(batch.issuer_health).map(([bank, info]) => (
-            <div key={bank} className="metric" style={{ minWidth: 120 }}>
-              <div className="label">{bank.toUpperCase()}</div>
-              <div className="value" style={{
-                color: info.health === 'critical' ? '#ef4444' : info.health === 'degraded' ? '#f59e0b' : '#10b981',
-                fontSize: '1rem'
-              }}>
-                {info.health}
-              </div>
-              <div className="delta">
-                TD {(info.td_rate * 100).toFixed(1)}% · {info.multiplier_over_baseline}x baseline
-                {info.backoff_minutes > 0 ? ` · backoff ${info.backoff_minutes}m` : ''}
-              </div>
-            </div>
+        <nav className="sidebar-nav">
+          {(['overview', 'sandbox', 'stability', 'model', 'edges'] as View[]).map((v) => (
+            <button key={v} className={`nav-item ${view === v ? 'active' : ''}`} onClick={() => setView(v)}>
+              {v === 'overview' && '◉ Overview'}
+              {v === 'sandbox' && '⚙ Sandbox Lab'}
+              {v === 'stability' && '◎ Stability'}
+              {v === 'model' && '◈ Model Lab'}
+              {v === 'edges' && '◇ Edge Cases'}
+            </button>
           ))}
-        </section>
-      )}
+        </nav>
+        <div className="sidebar-footer">
+          <div className="status-dot live" />
+          Track 03 · AI Revenue Recovery
+        </div>
+      </aside>
 
-      <div className="layout">
-        <section className="panel">
-          <h2>Decision explorer</h2>
-          <p className="sub">Click a failure to see the full reason chain — constraints first, then policy.</p>
-
-          {batch && (
-            <div className="compare">
-              <div className="compare-col win">
-                <h3>Railwise</h3>
-                <p>Recovered: {inr(batch.railwise.recovered_paise)}</p>
-                <p>Hard waste: {batch.railwise.hard_decline_wasted_retries}</p>
-                <p>UPI violations: {batch.railwise.upi_cooldown_violations}</p>
-              </div>
-              <div className="compare-col">
-                <h3>Static baseline</h3>
-                <p>Recovered: {inr(batch.baseline.recovered_paise)}</p>
-                <p>Hard waste: {batch.baseline.hard_decline_wasted_retries}</p>
-                <p>UPI violations: {batch.baseline.upi_cooldown_violations}</p>
-              </div>
-            </div>
-          )}
-
-          <div className="tabs">
-            <button className={`tab ${tab === 'edges' ? 'active' : ''}`} onClick={() => setTab('edges')}>
-              Edge cases
-            </button>
-            <button className={`tab ${tab === 'audits' ? 'active' : ''}`} onClick={() => setTab('audits')}>
-              Batch audits
-            </button>
+      {/* Main */}
+      <main className="main">
+        <header className="topbar">
+          <h1>
+            {view === 'overview' && 'Payment Recovery Dashboard'}
+            {view === 'sandbox' && 'Ablation Sandbox'}
+            {view === 'stability' && 'Multi-Seed Stability'}
+            {view === 'model' && 'Model Training Lab'}
+            {view === 'edges' && 'Edge Case Gallery'}
+          </h1>
+          <div className="topbar-actions">
+            {view === 'overview' && (
+              <button className="btn-primary" disabled={!!loading} onClick={runBatch}>
+                {loading === 'batch' ? 'Running…' : 'Run A/B Batch'}
+              </button>
+            )}
+            {view === 'stability' && (
+              <button className="btn-primary" disabled={!!loading} onClick={runStability}>
+                {loading === 'stability' ? 'Running 30 seeds…' : 'Run 30-Seed Stability'}
+              </button>
+            )}
+            {view === 'model' && (
+              <button className="btn-primary" disabled={!!loading} onClick={() => runTraining(true)}>
+                {loading === 'train' ? 'Training…' : 'Train Model Live'}
+              </button>
+            )}
           </div>
+        </header>
 
-          <div className="list">
-            {tab === 'edges' &&
-              edgeCases.map((ec) => {
-                const audit = edgeDecisionToAudit(ec)
-                return (
-                  <button
-                    key={ec.id}
-                    className={`list-item ${selected?.payment_id === audit.payment_id ? 'selected' : ''}`}
-                    onClick={() => setSelected(audit)}
-                  >
-                    <div className="row">
-                      <strong>{ec.title}</strong>
-                      <span className={`badge ${audit.action}`}>{audit.action}</span>
+        {error && <div className="alert alert-error">{error}</div>}
+
+        {/* OVERVIEW */}
+        {view === 'overview' && (
+          <div className="view-content">
+            {batch ? (
+              <>
+                <div className="kpi-grid">
+                  <KpiCard label="Soft Recovery (Railwise)" value={pct(batch.railwise.soft_recovery_rate)} delta={`+${pct(batch.lift.soft_recovery_rate_delta)} vs baseline`} positive />
+                  <KpiCard label="₹ Recovered Lift" value={inr(batch.lift.recovered_paise_delta)} delta={`Total ${inr(batch.railwise.recovered_paise)}`} positive />
+                  <KpiCard label="Hard Wasted Retries" value={String(batch.railwise.hard_decline_wasted_retries)} delta="Must be 0" positive={batch.railwise.hard_decline_wasted_retries === 0} />
+                  <KpiCard label="UPI Violations" value={String(batch.railwise.upi_cooldown_violations)} delta="Must be 0" positive={batch.railwise.upi_cooldown_violations === 0} />
+                  <KpiCard label="PDN Blocks" value={String(batch.railwise.pdn_compliance_blocks ?? 0)} delta="RBI compliance" />
+                  <KpiCard label="Issuer Backoffs" value={String(batch.railwise.issuer_adaptive_backoffs ?? 0)} delta="Thundering herd defense" />
+                </div>
+
+                {batch.issuer_health && (
+                  <section className="card">
+                    <h2>Issuer Health Monitor</h2>
+                    <div className="issuer-grid">
+                      {Object.entries(batch.issuer_health).map(([bank, info]) => (
+                        <div key={bank} className={`issuer-chip health-${info.health}`}>
+                          <span className="issuer-name">{bank.toUpperCase()}</span>
+                          <span className="issuer-health">{info.health}</span>
+                          <span className="issuer-td">TD {(info.td_rate * 100).toFixed(1)}%</span>
+                        </div>
+                      ))}
                     </div>
-                    <div className="muted">{ec.notes}</div>
-                  </button>
-                )
-              })}
-            {tab === 'audits' &&
-              (batch?.sample_audits || []).map((a) => (
-                <button
-                  key={a.decision_id}
-                  className={`list-item ${selected?.decision_id === a.decision_id ? 'selected' : ''}`}
-                  onClick={() => setSelected(a)}
-                >
-                  <div className="row">
-                    <strong>
-                      {a.rail.toUpperCase()} · {a.issuer_bank?.toUpperCase() || ''} · {a.decline_code}
-                    </strong>
-                    <span className={`badge ${a.action}`}>{a.action}</span>
-                  </div>
-                  <div className="muted">
-                    {a.payment_id} · attempt {a.attempt_number} · {inr(a.amount_paise)}
-                    {a.mandate_vitality_level && a.mandate_vitality_level !== 'healthy'
-                      ? ` · vitality:${a.mandate_vitality_level}`
-                      : ''}
-                  </div>
-                </button>
-              ))}
-            {tab === 'audits' && !batch && <div className="empty">Run a batch to load audits.</div>}
-          </div>
-        </section>
-
-        <section className="panel">
-          <h2>Reason chain</h2>
-          <p className="sub">Why this action — signals, constraints, and where AI did or did not vote.</p>
-
-          {!selected && <div className="empty">Select a decision to inspect.</div>}
-
-          {selected && (
-            <div className="trace">
-              <div className="trace-step" style={{ animationDelay: '0ms' }}>
-                <strong>Input</strong>
-                {selected.rail.toUpperCase()} · {selected.issuer_bank?.toUpperCase() || '?'} ·{' '}
-                {selected.decline_code}{selected.decline_iso_code ? ` (ISO ${selected.decline_iso_code})` : ''} ·
-                attempt {selected.attempt_number}
-                {(selected.consecutive_failures ?? 0) > 0 ? ` · ${selected.consecutive_failures} consec. fails` : ''} ·{' '}
-                {inr(selected.amount_paise)}
-              </div>
-              {(selected.issuer_health_level || selected.mandate_vitality_level) && (
-                <div className="trace-step" style={{ animationDelay: '20ms' }}>
-                  <strong>Defensive AI signals</strong>
-                  {selected.issuer_health_level && (
-                    <span style={{ marginRight: 12 }}>
-                      Issuer health:{' '}
-                      <span style={{
-                        color: selected.issuer_health_level === 'critical' ? '#ef4444' :
-                          selected.issuer_health_level === 'degraded' ? '#f59e0b' : '#10b981'
-                      }}>
-                        {selected.issuer_health_level}
-                      </span>
-                    </span>
-                  )}
-                  {selected.mandate_vitality_level && (
-                    <span>
-                      Mandate vitality:{' '}
-                      <span style={{
-                        color: selected.mandate_vitality_level === 'likely_dead' ? '#ef4444' :
-                          selected.mandate_vitality_level === 'at_risk' ? '#f59e0b' : '#10b981'
-                      }}>
-                        {selected.mandate_vitality_level}
-                      </span>
-                    </span>
-                  )}
-                </div>
-              )}
-              <div className="trace-step" style={{ animationDelay: '40ms' }}>
-                <strong>Classification</strong>
-                recoverability {selected.recoverability?.toFixed?.(2) ?? selected.recoverability} · source{' '}
-                {selected.classification_source}
-                {selected.feature_importance && Object.keys(selected.feature_importance).length > 0 && (
-                  <div className="muted" style={{ marginTop: 6 }}>
-                    Top features:{' '}
-                    {Object.entries(selected.feature_importance)
-                      .sort((a, b) => b[1] - a[1])
-                      .slice(0, 3)
-                      .map(([k, v]) => `${k} ${(v * 100).toFixed(0)}%`)
-                      .join(' · ')}
-                  </div>
+                  </section>
                 )}
-              </div>
-              {(selected.constraint_hits || []).map((h, i) => (
-                <div key={h.code + i} className="trace-step" style={{ animationDelay: `${80 + i * 40}ms` }}>
-                  <strong>Constraint · {h.code}</strong>
-                  {h.message}
-                </div>
-              ))}
-              {reasonSteps.map((step, i) => (
-                <div key={step + i} className="trace-step" style={{ animationDelay: `${120 + i * 30}ms` }}>
-                  <strong>Step {i + 1}</strong>
-                  {step}
-                </div>
-              ))}
-              <div className="trace-step" style={{ animationDelay: '220ms' }}>
-                <strong>Final action</strong>
-                <span className={`badge ${selected.action}`}>{selected.action}</span>
-                {selected.target_rail ? ` → ${selected.target_rail}` : ''}
-                {selected.delay_minutes != null ? ` · delay ${Math.round(selected.delay_minutes)}m` : ''}
-                {selected.execution_result ? ` · ${selected.execution_result}` : ''}
-              </div>
 
-              {selected.constraint_hits?.some((h) => h.code === 'attempt_budget_exhausted') && (
-                <div className="featured">
-                  <h3>Featured failure — what broke, how we got out</h3>
-                  <p>
-                    Classification still scored this debit as recoverable (soft NSF / high
-                    recoverability), but the UPI attempt budget was exhausted (1 original + 3 retries).
-                    Soft signal lost to the hard ceiling: no further debit — rail-switch / payment link
-                    instead. That priority order is the product.
-                  </p>
-                  <code>compliance ceiling &gt; recoverability score → rail_switch</code>
+                <section className="card">
+                  <h2>Live Failure Feed</h2>
+                  <div className="failure-grid">
+                    {(batch.sample_audits || []).slice(0, 12).map((a) => (
+                      <FailureCard key={a.decision_id} audit={a} />
+                    ))}
+                  </div>
+                </section>
+              </>
+            ) : (
+              <EmptyState message="Run an A/B batch to populate the dashboard" action={runBatch} actionLabel="Run Batch" />
+            )}
+          </div>
+        )}
+
+        {/* SANDBOX */}
+        {view === 'sandbox' && (
+          <div className="view-content sandbox-layout">
+            <section className="card toggles-card">
+              <h2>Railwise Blocks — toggle on/off</h2>
+              <p className="muted">Turn layers off to see how decisions change in real time.</p>
+              <div className="toggle-grid">
+                <Toggle label="ML Model" sub="Ambiguous decline classifier" on={toggles.use_ml_model} onChange={() => toggle('use_ml_model')} />
+                <Toggle label="Compliance Blocks" sub="NPCI/RBI hard gate" on={toggles.use_compliance_blocks} onChange={() => toggle('use_compliance_blocks')} />
+                <Toggle label="Issuer Health" sub="Cross-customer outage backoff" on={toggles.use_issuer_health} onChange={() => toggle('use_issuer_health')} />
+                <Toggle label="Mandate Vitality" sub="Proactive mandate death" on={toggles.use_mandate_vitality} onChange={() => toggle('use_mandate_vitality')} />
+                <Toggle label="Timing AI" sub="Payday / non-peak slots" on={toggles.use_timing_ai} onChange={() => toggle('use_timing_ai')} />
+              </div>
+              <button className="btn-secondary" onClick={runAblation} disabled={!!loading}>
+                {loading === 'ablation' ? 'Running batch ablation…' : 'Run Full Ablation Study (200 events)'}
+              </button>
+            </section>
+
+            <div className="sandbox-body">
+              <section className="card">
+                <h2>Pick a failure to test</h2>
+                <div className="edge-picker">
+                  {edgeCases.map((ec) => (
+                    <button key={ec.id} className={`edge-btn ${selectedEdge?.id === ec.id ? 'selected' : ''}`} onClick={() => selectEdge(ec)}>
+                      {ec.title}
+                    </button>
+                  ))}
                 </div>
+              </section>
+
+              {sandboxResult && (
+                <section className="card compare-card">
+                  <h2>Decision Comparison</h2>
+                  {sandboxResult.action_changed && <div className="alert alert-warn">Action changed when toggles modified!</div>}
+                  <div className="compare-columns">
+                    <CompareCol title="Full Railwise" action={sandboxResult.full_railwise.action} recov={sandboxResult.full_railwise.classification.recoverability} source={sandboxResult.full_railwise.classification.source} constraints={sandboxResult.full_railwise.constraint_hits} chain={sandboxResult.full_railwise.reason_chain} highlight />
+                    <CompareCol title="Your Config" action={sandboxResult.your_config.action} recov={sandboxResult.your_config.classification.recoverability} source={sandboxResult.your_config.classification.source} constraints={sandboxResult.your_config.constraint_hits} chain={sandboxResult.your_config.reason_chain} changed={sandboxResult.action_changed} />
+                  </div>
+                </section>
+              )}
+
+              {ablation && (
+                <section className="card">
+                  <h2>Ablation Results (batch)</h2>
+                  <table className="data-table">
+                    <thead>
+                      <tr><th>Variant</th><th>Soft Recovery</th><th>₹ Recovered</th><th>Hard Waste</th><th>UPI Viol.</th></tr>
+                    </thead>
+                    <tbody>
+                      {ablation.variants.map((v) => (
+                        <tr key={v.variant} className={v.variant === 'full_railwise' ? 'row-highlight' : ''}>
+                          <td>{v.variant}</td>
+                          <td>{pct(v.metrics.soft_recovery_rate)}</td>
+                          <td>{inr(v.metrics.recovered_paise)}</td>
+                          <td>{v.metrics.hard_decline_wasted_retries}</td>
+                          <td>{v.metrics.upi_cooldown_violations}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
               )}
             </div>
-          )}
-        </section>
-      </div>
+          </div>
+        )}
+
+        {/* STABILITY */}
+        {view === 'stability' && (
+          <div className="view-content">
+            {stability ? (
+              <>
+                <div className="kpi-grid">
+                  <KpiCard label="Wins vs Baseline" value={`${stability.summary.railwise_wins_soft_rate}/${stability.n_seeds}`} delta="soft recovery rate" positive />
+                  <KpiCard label="Avg Lift" value={`+${stability.summary.avg_soft_delta_pp} pp`} delta={`σ=${stability.summary.std_soft_delta_pp} pp`} positive />
+                  <KpiCard label="Recovery Mean" value={pct(stability.summary.railwise_soft_recovery_mean)} delta={`σ=${(stability.summary.railwise_soft_recovery_std * 100).toFixed(2)}%`} />
+                  <KpiCard label="Compliance" value={stability.summary.zero_hard_wasted_all_seeds && stability.summary.zero_upi_violations_all_seeds ? 'PASS' : 'FAIL'} delta="0 violations all seeds" positive={stability.summary.zero_hard_wasted_all_seeds} />
+                </div>
+                <section className="card">
+                  <h2>Per-Seed Audit Trail ({stability.n_seeds} seeds)</h2>
+                  <div className="stability-bars">
+                    {stability.seeds.map((s) => (
+                      <div key={s.seed} className="stability-row" title={`Seed ${s.seed}: Δ${s.soft_delta_pp}pp`}>
+                        <span className="seed-label">{s.seed}</span>
+                        <div className="bar-track">
+                          <div className={`bar-fill ${s.soft_delta_pp >= 0 ? 'positive' : 'negative'}`} style={{ width: `${Math.min(100, Math.abs(s.soft_delta_pp) * 10)}%` }} />
+                        </div>
+                        <span className={`delta-label ${s.soft_delta_pp >= 0 ? 'pos' : 'neg'}`}>{s.soft_delta_pp >= 0 ? '+' : ''}{s.soft_delta_pp}pp</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </>
+            ) : (
+              <EmptyState message="Run 30-seed stability to prove consistent lift with minimal fluctuation" action={runStability} actionLabel="Run Stability" />
+            )}
+          </div>
+        )}
+
+        {/* MODEL LAB */}
+        {view === 'model' && (
+          <div className="view-content">
+            {loading === 'train' && (
+              <div className="alert alert-warn">Training model… this takes a few seconds (5 stability seeds).</div>
+            )}
+            {hasValidTraining(training) ? (
+              <>
+                <div className="kpi-grid">
+                  <KpiCard label="Accuracy" value={pct(training.metrics.accuracy)} delta="held-out test" positive={training.metrics.accuracy >= 0.85} />
+                  <KpiCard label="Soft Recall" value={pct(training.metrics.soft_recall)} delta="don't miss recoverable" positive />
+                  <KpiCard label="Hard Recall" value={pct(training.metrics.hard_recall)} delta="don't waste retries" positive />
+                  <KpiCard label="Quality Gate" value={training.quality_passed ? 'PASSED' : 'FAILED'} delta="≥72% acc, ≥60% hard recall" positive={training.quality_passed} />
+                </div>
+
+                <div className="two-col">
+                  <section className="card">
+                    <h2>Training Audit Trail</h2>
+                    <div className="audit-trail">
+                      {(training.audit_trail || []).map((step, i) => (
+                        <div key={i} className="audit-step">
+                          <span className="step-num">{i + 1}</span>
+                          <div>
+                            <strong>{step.step}</strong>
+                            <p>{step.detail}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                  <section className="card">
+                    <h2>Feature Weights (interpretable)</h2>
+                    <div className="weight-list">
+                      {(training.feature_weights || []).map((fw) => (
+                        <div key={fw.feature} className="weight-row">
+                          <span>{fw.feature}</span>
+                          <span className={`weight-val ${fw.direction}`}>{fw.weight > 0 ? '+' : ''}{fw.weight.toFixed(3)} → {fw.direction}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+
+                {training.training_stability && (
+                  <section className="card">
+                    <h2>Training Stability ({training.training_stability.runs.length} seeds)</h2>
+                    <p className="muted">Accuracy mean {pct(training.training_stability.summary.accuracy_mean)} · σ={(training.training_stability.summary.accuracy_std * 100).toFixed(2)}%</p>
+                    <div className="stability-bars compact">
+                      {training.training_stability.runs.map((r) => (
+                        <div key={r.train_seed} className="stability-row">
+                          <span className="seed-label">s{r.train_seed}</span>
+                          <div className="bar-track">
+                            <div className="bar-fill positive" style={{ width: `${r.accuracy * 100}%` }} />
+                          </div>
+                          <span className="delta-label pos">{pct(r.accuracy)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                <section className="card">
+                  <h2>Where AI is used (one-liners)</h2>
+                  <div className="ai-grid">
+                    {aiUsage.map((layer) => (
+                      <div key={layer.name} className={`ai-card ${layer.uses_ai ? 'ai-yes' : 'ai-no'}`}>
+                        <div className="ai-badge">{layer.uses_ai ? 'AI' : 'Rules'}</div>
+                        <strong>{layer.name}</strong>
+                        <p>{layer.why}</p>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </>
+            ) : (
+              <EmptyState message="Train the ambiguous-decline classifier live" action={() => runTraining(true)} actionLabel="Train Model" />
+            )}
+          </div>
+        )}
+
+        {/* EDGES */}
+        {view === 'edges' && (
+          <div className="view-content">
+            <div className="failure-grid large">
+              {edgeCases.map((ec) => (
+                <div key={ec.id} className="failure-card edge-card" onClick={() => { setView('sandbox'); selectEdge(ec) }}>
+                  <div className="fc-header">
+                    <span className="fc-rail">{(ec.fixture.method as string || 'card').toUpperCase()}</span>
+                    <span className={actionClass(ec.decision.action)}>{ec.decision.action}</span>
+                  </div>
+                  <div className="fc-title">{ec.title}</div>
+                  <div className="fc-meta">{ec.notes}</div>
+                  <div className="fc-footer">
+                    <span>recov {ec.decision.classification.recoverability.toFixed(2)}</span>
+                    <span>{ec.decision.classification.source}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </main>
     </div>
   )
 }
 
-function edgeDecisionToAudit(ec: EdgeCase): Audit {
-  const d = ec.decision
-  const fixture = ec.fixture
-  return {
-    decision_id: d.decision_id,
-    payment_id: d.payment_id,
-    rail: fixture?.method || 'card',
-    issuer_bank: (fixture as Record<string, unknown>)?.issuer_bank as string | undefined,
-    decline_code: fixture?.error?.code || 'unknown',
-    decline_iso_code: (fixture?.error as Record<string, unknown>)?.iso_code as string | undefined,
-    amount_paise: fixture?.amount || 0,
-    attempt_number: fixture?.attempt_number || 1,
-    consecutive_failures: (fixture as Record<string, unknown>)?.consecutive_failures as number | undefined,
-    action: d.action,
-    decline_kind: d.classification?.decline_kind || 'soft',
-    recoverability: d.classification?.recoverability ?? 0,
-    classification_source: d.classification?.source || 'rules',
-    feature_importance: d.classification?.feature_importance,
-    constraint_hits: d.constraint_hits || [],
-    reason_chain: d.reason_chain || [],
-    policy_name: d.policy_name || 'railwise',
-    execution_result: d.execution_result,
-    recovered_amount_paise: d.recovered_amount_paise || 0,
-    delay_minutes: d.delay_minutes,
-    target_rail: d.target_rail,
-    issuer_health_level: (d as Record<string, unknown>)?.issuer_health_level as string | undefined,
-    mandate_vitality_level: (d as Record<string, unknown>)?.mandate_vitality_level as string | undefined,
-  }
+// ── Sub-components ─────────────────────────────────────────────────────────
+
+function KpiCard({ label, value, delta, positive }: { label: string; value: string; delta: string; positive?: boolean }) {
+  return (
+    <div className={`kpi-card ${positive ? 'kpi-good' : ''}`}>
+      <div className="kpi-label">{label}</div>
+      <div className="kpi-value">{value}</div>
+      <div className="kpi-delta">{delta}</div>
+    </div>
+  )
+}
+
+function FailureCard({ audit }: { audit: Audit }) {
+  return (
+    <div className="failure-card">
+      <div className="fc-header">
+        <span className="fc-rail">{audit.rail.toUpperCase()}</span>
+        <span className="fc-issuer">{audit.issuer_bank?.toUpperCase()}</span>
+        <span className={actionClass(audit.action)}>{audit.action}</span>
+      </div>
+      <div className="fc-amount">{inr(audit.amount_paise)}</div>
+      <div className="fc-decline">
+        {audit.decline_code}
+        {audit.decline_iso_code && <span className="iso">ISO {audit.decline_iso_code}</span>}
+      </div>
+      <div className="fc-meta">
+        Attempt {audit.attempt_number} · {audit.decline_kind} · recov {(audit.recoverability * 100).toFixed(0)}%
+      </div>
+      {audit.constraint_hits?.length > 0 && (
+        <div className="fc-constraints">
+          {audit.constraint_hits.slice(0, 2).map((h) => (
+            <span key={h.code} className="constraint-tag">{h.code}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Toggle({ label, sub, on, onChange }: { label: string; sub: string; on: boolean; onChange: () => void }) {
+  return (
+    <label className="toggle-item">
+      <div>
+        <strong>{label}</strong>
+        <span>{sub}</span>
+      </div>
+      <button type="button" className={`toggle-switch ${on ? 'on' : 'off'}`} onClick={onChange} aria-pressed={on}>
+        <span className="toggle-knob" />
+      </button>
+    </label>
+  )
+}
+
+function CompareCol({ title, action, recov, source, constraints, chain, highlight, changed }: {
+  title: string; action: string; recov: number; source: string
+  constraints: Array<{ code: string }>; chain: string[]
+  highlight?: boolean; changed?: boolean
+}) {
+  return (
+    <div className={`compare-col ${highlight ? 'highlight' : ''} ${changed ? 'changed' : ''}`}>
+      <h3>{title}</h3>
+      <div className={actionClass(action)}>{action}</div>
+      <p>Recoverability: <strong>{recov.toFixed(3)}</strong> · {source}</p>
+      <div className="constraint-tags">
+        {constraints.map((c) => <span key={c.code} className="constraint-tag">{c.code}</span>)}
+        {constraints.length === 0 && <span className="muted">No constraints fired</span>}
+      </div>
+      <details>
+        <summary>Reason chain ({chain.length} steps)</summary>
+        <ol className="reason-list">{chain.map((s, i) => <li key={i}>{s}</li>)}</ol>
+      </details>
+    </div>
+  )
+}
+
+function EmptyState({ message, action, actionLabel }: { message: string; action: () => void; actionLabel: string }) {
+  return (
+    <div className="empty-state">
+      <p>{message}</p>
+      <button className="btn-primary" onClick={action}>{actionLabel}</button>
+    </div>
+  )
 }
