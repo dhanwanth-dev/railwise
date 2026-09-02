@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import './App.css'
+import AutopayJourney from './AutopayJourney'
 
 const API = '/api'
 
@@ -89,7 +90,7 @@ type AblationResult = {
   comparisons: Array<{ variant: string; vs_full: Record<string, number> }>
 }
 
-type View = 'overview' | 'sandbox' | 'stability' | 'model' | 'edges'
+type View = 'journey' | 'overview' | 'sandbox' | 'stability' | 'model' | 'edges'
 
 type Toggles = {
   use_ml_model: boolean
@@ -128,7 +129,7 @@ function hasValidTraining(t: TrainingResult | null | undefined): t is TrainingRe
 }
 
 export default function App() {
-  const [view, setView] = useState<View>('overview')
+  const [view, setView] = useState<View>('journey')
   const [batch, setBatch] = useState<BatchResult | null>(null)
   const [stability, setStability] = useState<StabilityResult | null>(null)
   const [training, setTraining] = useState<TrainingResult | null>(null)
@@ -253,8 +254,9 @@ export default function App() {
           </div>
         </div>
         <nav className="sidebar-nav">
-          {(['overview', 'sandbox', 'stability', 'model', 'edges'] as View[]).map((v) => (
+          {(['journey', 'overview', 'sandbox', 'stability', 'model', 'edges'] as View[]).map((v) => (
             <button key={v} className={`nav-item ${view === v ? 'active' : ''}`} onClick={() => setView(v)}>
+              {v === 'journey' && '▸ Recovery Journey'}
               {v === 'overview' && '◉ Overview'}
               {v === 'sandbox' && '⚙ Sandbox Lab'}
               {v === 'stability' && '◎ Stability'}
@@ -273,6 +275,7 @@ export default function App() {
       <main className="main">
         <header className="topbar">
           <h1>
+            {view === 'journey' && 'Mandate Recovery Journey'}
             {view === 'overview' && 'Payment Recovery Dashboard'}
             {view === 'sandbox' && 'Ablation Sandbox'}
             {view === 'stability' && 'Multi-Seed Stability'}
@@ -299,6 +302,13 @@ export default function App() {
         </header>
 
         {error && <div className="alert alert-error">{error}</div>}
+
+        {/* RECOVERY JOURNEY */}
+        {view === 'journey' && (
+          <div className="view-content journey-wrap">
+            <AutopayJourney />
+          </div>
+        )}
 
         {/* OVERVIEW */}
         {view === 'overview' && (
