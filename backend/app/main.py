@@ -19,6 +19,13 @@ if str(ROOT) not in sys.path:
 from app.db import append_audit, get_session, init_db, save_batch  # noqa: E402
 from data.fixtures import EDGE_CASES  # noqa: E402
 from data.generator import generate_batch, write_batch  # noqa: E402
+from engine.analytics import (
+    compare_single_event,
+    run_ablation_batch,
+    run_model_training_stability,
+    run_stability,
+)
+from engine.config import EngineConfig  # noqa: E402
 from engine.issuer_health import get_monitor  # noqa: E402
 from engine.mandate_vitality import score_mandate_vitality  # noqa: E402
 from engine.pipeline import decide, run_batch  # noqa: E402
@@ -39,6 +46,9 @@ app.add_middleware(
 )
 
 _LATEST: dict[str, Any] = {}
+_LATEST_STABILITY: dict[str, Any] = {}
+_LATEST_TRAINING: dict[str, Any] = {}
+_LATEST_ABLATION: dict[str, Any] = {}
 _KILL_SWITCH = False
 
 
@@ -46,6 +56,39 @@ class DecideRequest(BaseModel):
     event: dict[str, Any]
     policy: str = "railwise"
     simulate: bool = True
+    use_ml_model: bool = True
+    use_compliance_blocks: bool = True
+    use_issuer_health: bool = True
+    use_mandate_vitality: bool = True
+    use_timing_ai: bool = True
+
+
+class SandboxRequest(BaseModel):
+    event: dict[str, Any]
+    use_ml_model: bool = True
+    use_compliance_blocks: bool = True
+    use_issuer_health: bool = True
+    use_mandate_vitality: bool = True
+    use_timing_ai: bool = True
+    compare_all_variants: bool = False
+
+
+class StabilityRequest(BaseModel):
+    n_seeds: int = Field(default=30, ge=5, le=50)
+    batch_size: int = Field(default=500, ge=100, le=1000)
+    seed_start: int = 1
+
+
+class AblationRequest(BaseModel):
+    batch_size: int = Field(default=200, ge=50, le=500)
+    seed: int = 42
+
+
+class TrainRequest(BaseModel):
+    train_seed: int = 7
+    n_train: int = Field(default=3000, ge=500, le=10000)
+    n_test: int = Field(default=600, ge=100, le=2000)
+    stability_runs: int = Field(default=0, ge=0, le=10)
 
 
 class BatchRequest(BaseModel):
@@ -80,8 +123,169 @@ def set_kill_switch(enabled: bool = True) -> dict:
 
 @app.post("/decide")
 def api_decide(body: DecideRequest) -> dict:
-    decision = decide(body.event, policy=body.policy, kill_switch=_KILL_SWITCH, simulate=body.simulate)
+    cfg = EngineConfig(
+        use_ml_model=body.use_ml_model,
+        use_compliance_blocks=body.use_compliance_blocks,
+        use_issuer_health=body.use_issuer_health,
+        use_mandate_vitality=body.use_mandate_vitality,
+        use_timing_ai=body.use_timing_ai,
+    )
+    decision = decide(
+        body.event,
+        policy=body.policy,
+        kill_switch=_KILL_SWITCH,
+        simulate=body.simulate,
+        config=cfg if body.policy == "railwise" else None,
+    )
     return decision.model_dump(mode="json")
+
+
+@app.post("/sandbox/compare")
+def api_sandbox_compare(body: SandboxRequest) -> dict:
+    """Live ablation: compare full Railwise vs toggled variants on one event."""
+    if body.compare_all_variants:
+        return compare_single_event(body.event, kill_switch=_KILL_SWITCH)
+
+    cfg = EngineConfig(
+        use_ml_model=body.use_ml_model,
+        use_compliance_blocks=body.use_compliance_blocks,
+        use_issuer_health=body.use_issuer_health,
+        use_mandate_vitality=body.use_mandate_vitality,
+        use_timing_ai=body.use_timing_ai,
+    )
+    full = decide(body.event, policy="railwise", kill_switch=_KILL_SWITCH, simulate=False, config=EngineConfig.full())
+    custom = decide(body.event, policy="railwise", kill_switch=_KILL_SWITCH, simulate=False, config=cfg)
+    return {
+        "full_railwise": full.model_dump(mode="json"),
+        "your_config": custom.model_dump(mode="json"),
+        "config": cfg.model_dump(),
+        "action_changed": full.action != custom.action,
+        "diffs": {
+            "action": {"full": full.action.value, "custom": custom.action.value},
+            "recoverability": {
+                "full": full.classification.recoverability,
+                "custom": custom.classification.recoverability,
+            },
+            "constraint_count": {
+                "full": len(full.constraint_hits),
+                "custom": len(custom.constraint_hits),
+            },
+        },
+    }
+
+
+@app.post("/analytics/stability")
+def api_stability(body: StabilityRequest) -> dict:
+    global _LATEST_STABILITY
+    result = run_stability(
+        n_seeds=body.n_seeds,
+        batch_size=body.batch_size,
+        seed_start=body.seed_start,
+    )
+    _LATEST_STABILITY = result
+    return result
+
+
+@app.get("/analytics/stability/latest")
+def api_stability_latest() -> dict:
+    if not _LATEST_STABILITY:
+        return api_stability(StabilityRequest())
+    return _LATEST_STABILITY
+
+
+@app.post("/analytics/ablation")
+def api_ablation(body: AblationRequest) -> dict:
+    global _LATEST_ABLATION
+    result = run_ablation_batch(batch_size=body.batch_size, seed=body.seed)
+    _LATEST_ABLATION = result
+    return result
+
+
+@app.get("/analytics/ablation/latest")
+def api_ablation_latest() -> dict:
+    if not _LATEST_ABLATION:
+        return api_ablation(AblationRequest())
+    return _LATEST_ABLATION
+
+
+def _build_training_payload(
+    result: dict,
+    *,
+    train_seed: int = 7,
+    n_train: int = 3000,
+    n_test: int = 600,
+    stability: dict | None = None,
+) -> dict:
+    """Wrap raw run_training() output with audit trail for Model Lab UI."""
+    metrics = result.get("metrics") or {}
+    audit_trail = [
+        {"step": "generate_samples", "detail": f"{n_train} train + {n_test} test (seed={train_seed})"},
+        {"step": "train_logistic_sgd", "detail": "60 epochs, L2=0.001, 15 features"},
+        {"step": "evaluate_test_set", "detail": f"accuracy={metrics.get('accuracy', 0):.1%}"},
+        {"step": "quality_gate", "detail": "PASSED" if result.get("quality_passed") else "FAILED"},
+        {"step": "persist_weights", "detail": result.get("model_path", "data/models/ambiguous_clf.json")},
+    ]
+    return {
+        **result,
+        "audit_trail": audit_trail,
+        "training_stability": stability,
+    }
+
+
+@app.post("/model/train")
+def api_model_train(body: TrainRequest) -> dict:
+    """Live model training — returns metrics audit trail."""
+    from data.train_model import run_training
+    from engine.classify import reload_model
+
+    global _LATEST_TRAINING
+    result = run_training(train_seed=body.train_seed, n_train=body.n_train, n_test=body.n_test)
+    reload_model()
+
+    stability = None
+    if body.stability_runs > 0:
+        stability = run_model_training_stability(n_seeds=body.stability_runs)
+
+    payload = _build_training_payload(
+        result,
+        train_seed=body.train_seed,
+        n_train=body.n_train,
+        n_test=body.n_test,
+        stability=stability,
+    )
+    _LATEST_TRAINING = payload
+    return payload
+
+
+@app.get("/model/training/latest")
+def api_model_training_latest() -> dict:
+    global _LATEST_TRAINING
+    if not _LATEST_TRAINING or "metrics" not in _LATEST_TRAINING:
+        from data.train_model import run_training
+        from engine.classify import reload_model
+
+        result = run_training()
+        reload_model()
+        _LATEST_TRAINING = _build_training_payload(result)
+    return _LATEST_TRAINING
+
+
+@app.get("/ai/usage")
+def api_ai_usage() -> dict:
+    """One-liner map of where AI is used (and where it is not)."""
+    return {
+        "layers": [
+            {"name": "Ambiguous decline classifier", "uses_ai": True, "why": "Same code do_not_honor means different things on SBI vs HDFC — model learns issuer patterns."},
+            {"name": "Recoverability score", "uses_ai": True, "why": "Tells policy how much to trust a retry — compliance still has final say."},
+            {"name": "Timing (payday / non-peak)", "uses_ai": False, "why": "Rule-based slot ranking inside legal windows — interpretable, not a neural net."},
+            {"name": "Issuer Health Monitor", "uses_ai": False, "why": "Sliding-window TD rate math — detects outages without ML."},
+            {"name": "Mandate Vitality Scorer", "uses_ai": False, "why": "Weighted rules on failure history — proactive dunning before mandate dies."},
+            {"name": "Hard constraint gate", "uses_ai": False, "why": "NPCI/RBI rules never get a model vote — compliance is absolute."},
+            {"name": "Kill switch", "uses_ai": False, "why": "Human emergency override only."},
+        ],
+        "rule": "AI only votes when decline reason is ambiguous AND compliance already allows retry.",
+        "real_data_note": "Real Razorpay PII cannot be used publicly. Training uses NPCI-calibrated synthetic data + ISO 8583 taxonomy.",
+    }
 
 
 @app.post("/batch/run")
