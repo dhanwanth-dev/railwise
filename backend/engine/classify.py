@@ -343,7 +343,7 @@ def _model_ambiguous(event: PaymentFailureEvent) -> ClassificationResult:
     )
 
 
-def classify(event: PaymentFailureEvent) -> ClassificationResult:
+def classify(event: PaymentFailureEvent, *, use_model: bool = True) -> ClassificationResult:
     """
     Classify a payment failure event into decline kind + recoverability score.
 
@@ -436,5 +436,7 @@ def classify(event: PaymentFailureEvent) -> ClassificationResult:
             reason_codes=["soft_code_map"],
         )
 
-    # Ambiguous — use model
+    # Ambiguous — use model (or heuristic if ablation disables ML)
+    if not use_model:
+        return _heuristic_ambiguous(event)
     return _model_ambiguous(event)

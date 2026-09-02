@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from engine.classify import classify
+from engine.config import EngineConfig
 from engine.constraints import (
     UPI_MIN_REPRESENT_GAP_MINUTES,
     apply_forced_action,
@@ -158,8 +159,10 @@ def decide_railwise(
     *,
     kill_switch: bool = False,
     prior_decision: Optional[Decision] = None,
+    config: EngineConfig | None = None,
 ) -> Decision:
-    classification = classify(event)
+    cfg = config or EngineConfig.full()
+    classification = classify(event, use_model=cfg.use_ml_model)
     idem_key = _idempotency_key(event, "railwise")
     decision_id = str(uuid.uuid4())
 
@@ -172,19 +175,21 @@ def decide_railwise(
 
     # ── Mandate vitality signal ──────────────────────────────────────────────
     vitality_level, vitality_score, _ = score_mandate_vitality(event)
-    # Downweight recoverability for degraded mandates
-    multiplier = get_recoverability_multiplier(vitality_level)
-    if multiplier < 1.0:
-        adjusted_recov = classification.recoverability * multiplier
-        classification = classification.model_copy(update={
-            "recoverability": round(adjusted_recov, 4),
-            "reason_codes": list(classification.reason_codes) + [
-                f"mandate_vitality={vitality_level.value}(x{multiplier})"
-            ],
-        })
+    if cfg.use_mandate_vitality:
+        multiplier = get_recoverability_multiplier(vitality_level)
+        if multiplier < 1.0:
+            adjusted_recov = classification.recoverability * multiplier
+            classification = classification.model_copy(update={
+                "recoverability": round(adjusted_recov, 4),
+                "reason_codes": list(classification.reason_codes) + [
+                    f"mandate_vitality={vitality_level.value}(x{multiplier})"
+                ],
+            })
+    else:
+        vitality_level = MandateVitalityLevel.HEALTHY
 
     # ── Hard constraint gate ─────────────────────────────────────────────────
-    constraint_hits = evaluate_constraints(event, classification, kill_switch=kill_switch)
+    constraint_hits = evaluate_constraints(event, classification, kill_switch=kill_switch, config=cfg)
 
     reason_chain: list[str] = [
         f"rail={event.rail.value}",
@@ -257,8 +262,13 @@ def decide_railwise(
             delay_minutes = 0.0
             reason_chain.append("timing=immediate")
         else:
-            scheduled_at, delay_minutes, timing_reason = _rank_timing(event, classification, min_delay)
-            reason_chain.append(f"timing={timing_reason}")
+            if cfg.use_timing_ai:
+                scheduled_at, delay_minutes, timing_reason = _rank_timing(event, classification, min_delay)
+                reason_chain.append(f"timing={timing_reason}")
+            else:
+                delay_minutes = max(min_delay, 240.0)
+                scheduled_at = event.timestamp + timedelta(minutes=delay_minutes)
+                reason_chain.append("timing=static_4h_fallback")
 
     elif action == Action.RAIL_SWITCH:
         scheduled_at = event.timestamp + timedelta(minutes=30)
@@ -283,9 +293,9 @@ def decide_railwise(
         constraint_hits=constraint_hits,
         reason_chain=reason_chain,
         idempotency_key=idem_key,
-        policy_name="railwise",
-        issuer_health_level=_get_issuer_health_label(event),
-        mandate_vitality_level=vitality_level.value,
+        policy_name=f"railwise:{cfg.label()}",
+        issuer_health_level=_get_issuer_health_label(event) if cfg.use_issuer_health else "disabled",
+        mandate_vitality_level=vitality_level.value if cfg.use_mandate_vitality else "disabled",
     )
 
 

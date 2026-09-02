@@ -17,6 +17,7 @@ from typing import Optional
 
 from engine.audit import compute_metrics, decision_to_audit_record
 from engine.baseline import decide_baseline
+from engine.config import EngineConfig
 from engine.execute import execute
 from engine.issuer_health import is_technical_decline, reset_monitor
 from engine.normalize import normalize_raw
@@ -31,6 +32,7 @@ def decide(
     kill_switch: bool = False,
     prior_decision: Optional[Decision] = None,
     simulate: bool = True,
+    config: EngineConfig | None = None,
 ) -> Decision:
     if isinstance(event, dict):
         event = normalize_raw(event)
@@ -38,7 +40,9 @@ def decide(
     if policy == "baseline_static":
         decision = decide_baseline(event)
     else:
-        decision = decide_railwise(event, kill_switch=kill_switch, prior_decision=prior_decision)
+        decision = decide_railwise(
+            event, kill_switch=kill_switch, prior_decision=prior_decision, config=config
+        )
 
     if simulate:
         decision = execute(event, decision)
@@ -50,6 +54,7 @@ def run_batch(
     *,
     policy: str = "railwise",
     kill_switch: bool = False,
+    config: EngineConfig | None = None,
 ) -> tuple[list[PaymentFailureEvent], list[Decision], list[dict], BatchMetrics]:
     normalized: list[PaymentFailureEvent] = []
     decisions: list[Decision] = []
@@ -71,7 +76,9 @@ def run_batch(
             key = _idempotency_key(event, "railwise")
             prior = seen.get(key)
 
-        decision = decide(event, policy=policy, kill_switch=kill_switch, prior_decision=prior)
+        decision = decide(
+            event, policy=policy, kill_switch=kill_switch, prior_decision=prior, config=config
+        )
 
         # Record this event into the issuer health monitor so subsequent decisions
         # can see the accumulating cross-customer issuer signal.
