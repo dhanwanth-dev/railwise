@@ -52,15 +52,207 @@ _LATEST_ABLATION: dict[str, Any] = {}
 _KILL_SWITCH = False
 
 
-class DecideRequest(BaseModel):
-    event: dict[str, Any]
-    policy: str = "railwise"
-    simulate: bool = True
+class JourneyRequest(BaseModel):
+    rail: str = Field(default="upi", description="upi or card")
+    scenario: str = Field(default="nsf_early_retry", description="nsf_early_retry | ambiguous_sbi | token_expired")
     use_ml_model: bool = True
     use_compliance_blocks: bool = True
     use_issuer_health: bool = True
     use_mandate_vitality: bool = True
     use_timing_ai: bool = True
+    include_batch_feed: bool = True
+
+
+def _journey_event(rail: str, scenario: str) -> dict[str, Any]:
+    """Build a Razorpay-shaped failure for the Recovery Journey narrative."""
+    rail = rail.lower().strip()
+    method = "upi" if rail == "upi" else "card"
+    base = {
+        "id": f"pay_ForgeCLI_{method}_8xK2mQ",
+        "amount": 99900,
+        "currency": "INR",
+        "status": "failed",
+        "method": method,
+        "customer_id": "cust_forgecli_arjun",
+        "issuer_bank": "sbi",
+        "created_at": "2026-09-01T10:15:00",
+        "attempt_number": 2,
+        "hours_since_last_attempt": 0.15,
+        "prior_soft_recoveries": 1,
+        "prior_hard_declines": 0,
+        "consecutive_failures": 1,
+        "last_successful_debit_days_ago": 30,
+        "pre_debit_notification_sent": True,
+        "has_alt_upi_mandate": method == "card",
+        "has_alt_card": method == "upi",
+        "mandate_revoked": False,
+        "payday_day_of_month": 1,
+        "mandate_id": f"mandate_{method}_sbi_4419",
+        "token_id": "token_hdfc_coft_991" if method == "card" else None,
+    }
+    if scenario == "ambiguous_sbi":
+        base.update({
+            "error": {"code": "do_not_honor", "reason": "do_not_honor", "iso_code": "05"},
+            "decline_iso_code": "05",
+            "hours_since_last_attempt": 2.0,
+            "attempt_number": 1,
+        })
+    elif scenario == "token_expired":
+        base.update({
+            "method": "card",
+            "error": {"code": "token_expired", "reason": "token_expired"},
+            "hours_since_last_attempt": 24.0,
+            "attempt_number": 1,
+        })
+    else:
+        # Default: NSF too soon after last attempt — UPI cooldown / card payday path
+        base["error"] = {"code": "insufficient_funds", "reason": "insufficient_funds", "iso_code": "51"}
+        base["decline_iso_code"] = "51"
+    return base
+
+
+@app.post("/journey/run")
+def api_journey_run(body: JourneyRequest) -> dict:
+    """
+    Live Recovery Journey engine pass.
+    Returns baseline + full Railwise + ablation config decisions, pipeline stages,
+    and optional related failure feed from the latest batch.
+    """
+    event = _journey_event(body.rail, body.scenario)
+    cfg = EngineConfig(
+        use_ml_model=body.use_ml_model,
+        use_compliance_blocks=body.use_compliance_blocks,
+        use_issuer_health=body.use_issuer_health,
+        use_mandate_vitality=body.use_mandate_vitality,
+        use_timing_ai=body.use_timing_ai,
+    )
+
+    baseline = decide(event, policy="baseline_static", kill_switch=False, simulate=True)
+    full = decide(event, policy="railwise", kill_switch=_KILL_SWITCH, simulate=True, config=EngineConfig.full())
+    custom = decide(event, policy="railwise", kill_switch=_KILL_SWITCH, simulate=True, config=cfg)
+
+    # Pipeline stages for narrative UI (derived from live decision, not hard-coded prose)
+    stages = [
+        {
+            "id": "ingest",
+            "title": "Ingest & normalize",
+            "kind": "rules",
+            "summary": f"{event['method'].upper()} · {event['issuer_bank'].upper()} · {event['error']['code']}",
+            "fields": {
+                "payment_id": event["id"],
+                "rail": event["method"],
+                "issuer": event["issuer_bank"],
+                "attempt": event["attempt_number"],
+                "hours_since_last": event["hours_since_last_attempt"],
+                "iso": event.get("decline_iso_code") or event["error"].get("iso_code"),
+            },
+        },
+        {
+            "id": "classify",
+            "title": "Classify decline",
+            "kind": "ai" if full.classification.source == "model" else "rules",
+            "summary": (
+                f"{full.classification.decline_kind.value} · "
+                f"recov {full.classification.recoverability:.2f} · "
+                f"source {full.classification.source}"
+            ),
+            "fields": {
+                "decline_kind": full.classification.decline_kind.value,
+                "recoverability": full.classification.recoverability,
+                "confidence": full.classification.confidence,
+                "source": full.classification.source,
+                "reason_codes": full.classification.reason_codes,
+                "feature_importance": full.classification.feature_importance,
+            },
+        },
+        {
+            "id": "constraints",
+            "title": "Constraint gate",
+            "kind": "rules",
+            "summary": (
+                f"{len(full.constraint_hits)} hit(s)"
+                if full.constraint_hits
+                else "No forced constraint — policy may choose"
+            ),
+            "fields": {
+                "hits": [
+                    {"code": h.code.value, "message": h.message, "forced_action": h.forced_action.value if h.forced_action else None}
+                    for h in full.constraint_hits
+                ],
+            },
+        },
+        {
+            "id": "policy",
+            "title": "Policy & timing",
+            "kind": "policy",
+            "summary": f"{full.action.value}" + (f" · delay {full.delay_minutes}m" if full.delay_minutes is not None else ""),
+            "fields": {
+                "action": full.action.value,
+                "delay_minutes": full.delay_minutes,
+                "target_rail": full.target_rail.value if full.target_rail else None,
+                "issuer_health": full.issuer_health_level,
+                "mandate_vitality": full.mandate_vitality_level,
+                "reason_chain": full.reason_chain,
+            },
+        },
+        {
+            "id": "execute",
+            "title": "Execution result",
+            "kind": "execute",
+            "summary": full.execution_result or "pending",
+            "fields": {
+                "railwise_result": full.execution_result,
+                "railwise_recovered_paise": full.recovered_amount_paise,
+                "baseline_result": baseline.execution_result,
+                "baseline_recovered_paise": baseline.recovered_amount_paise,
+            },
+        },
+    ]
+
+    full_codes = [h.code.value for h in full.constraint_hits]
+    custom_codes = [h.code.value for h in custom.constraint_hits]
+
+    feed = []
+    if body.include_batch_feed:
+        if not _LATEST:
+            # Warm a small batch so the journey has a live failure feed
+            api_batch_run(BatchRequest(n=200, seed=2025, persist=False))
+        for a in (_LATEST.get("sample_audits") or [])[:8]:
+            feed.append(a)
+
+    return {
+        "event": event,
+        "product": {
+            "name": "ForgeCLI Pro",
+            "amount_paise": 99900,
+            "rail": body.rail,
+            "scenario": body.scenario,
+        },
+        "baseline": baseline.model_dump(mode="json"),
+        "full_railwise": full.model_dump(mode="json"),
+        "your_config": custom.model_dump(mode="json"),
+        "config": cfg.model_dump(),
+        "action_changed": full.action != custom.action,
+        "constraints_changed": full_codes != custom_codes,
+        "diff_summary": {
+            "full_action": full.action.value,
+            "custom_action": custom.action.value,
+            "full_constraints": full_codes,
+            "custom_constraints": custom_codes,
+            "full_delay_minutes": full.delay_minutes,
+            "custom_delay_minutes": custom.delay_minutes,
+            "full_recovered_paise": full.recovered_amount_paise,
+            "custom_recovered_paise": custom.recovered_amount_paise,
+        },
+        "stages": stages,
+        "failure_feed": feed,
+        "batch_metrics": {
+            "railwise": (_LATEST.get("railwise") if _LATEST else None),
+            "baseline": (_LATEST.get("baseline") if _LATEST else None),
+            "lift": (_LATEST.get("lift") if _LATEST else None),
+        },
+    }
+
 
 
 class SandboxRequest(BaseModel):
@@ -95,6 +287,17 @@ class BatchRequest(BaseModel):
     n: int = Field(default=500, ge=50, le=5000)
     seed: int = 42
     persist: bool = True
+
+
+class DecideRequest(BaseModel):
+    event: dict[str, Any]
+    policy: str = "railwise"
+    simulate: bool = True
+    use_ml_model: bool = True
+    use_compliance_blocks: bool = True
+    use_issuer_health: bool = True
+    use_mandate_vitality: bool = True
+    use_timing_ai: bool = True
 
 
 @app.on_event("startup")
