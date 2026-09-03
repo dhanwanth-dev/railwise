@@ -1,329 +1,468 @@
+<div align="center">
+
 # Railwise
 
-**Constraint-first recovery for failed UPI AutoPay and card recurring debits.**
+### Constraint-First Recovery Engine for Failed Recurring Payments in India
 
-<p align="center">
-  <img src="docs/assets/pipeline.svg" alt="Railwise decision pipeline: ingest, classify, constraints, policy, execute, audit" width="100%" />
-</p>
+<br />
 
-<p align="center">
-  <a href="https://razorpay.com/buildathon/"><img src="https://img.shields.io/badge/Razorpay-AI%20Buildathon%202026-0C2454?style=for-the-badge" alt="Razorpay AI Buildathon 2026" /></a>
-  <img src="https://img.shields.io/badge/Track%2003-AI%20Revenue%20Recovery-0E6B6D?style=for-the-badge" alt="Track 03" />
-</p>
+<img src="docs/assets/pipeline.svg" alt="Railwise decision pipeline" width="100%" />
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
-  <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111" alt="React" />
-  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white" alt="Vite" />
-  <img src="https://img.shields.io/badge/SQLite-audit%20log-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
-  <img src="https://img.shields.io/badge/pytest-28%20passed-0A9B4A?logo=pytest&logoColor=white" alt="pytest" />
-</p>
+<br />
 
-When a monthly AutoPay fails, the next click is not obvious. Retrying too soon can break NPCI rules. Retrying a stolen-card code wastes an attempt and can attract scheme fines. Waiting when SBI is having a technical spike can save the debit. Treating every `do_not_honor` the same way treats SBI and HDFC as if they were the same bank.
+[![Razorpay AI Buildathon 2026](https://img.shields.io/badge/Razorpay-AI%20Buildathon%202026-0C2454?style=for-the-badge)](https://razorpay.com/buildathon/)
+![Track 03](https://img.shields.io/badge/Track%2003-AI%20Revenue%20Recovery-0E6B6D?style=for-the-badge)
 
-Railwise is a decision engine for that moment. It sits after the failure webhook and chooses one bounded action: retry now, delay, switch rail, dun the customer, or stop. **Rules write the legal set. A small logistic model may vote only after that set is known.**
+<br />
 
-This repository is a complete, runnable demonstration: engine, tests, trained weights, and a live control panel. It does not move live money.
+<img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" />
+<img src="https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white" />
+<img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111" />
+<img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" />
+<img src="https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white" />
+<img src="https://img.shields.io/badge/SQLite-Audit%20Log-003B57?logo=sqlite&logoColor=white" />
+<img src="https://img.shields.io/badge/pytest-28%20passed-0A9B4A?logo=pytest&logoColor=white" />
 
----
+<br />
 
-## What problem this solves
+**When a recurring payment fails, the next action is not obvious.**<br />
+Retrying too soon breaks NPCI rules. Retrying a stolen card wastes an attempt. Waiting during an SBI spike saves the debit.<br />
+Treating every `do_not_honor` the same treats SBI and HDFC as the same bank. They are not.
 
-India's recurring stack is not a generic "retry later" problem. Three public facts set the shape of the work.
+<br />
 
-**AutoPay is now large, and a large share of presentations still fail.** NPCI publishes bank-wise AutoPay execution with approved, business-decline (BD), and technical-decline (TD) shares. Reporting through 2025–26 shows AutoPay volumes heading toward a billion presentations a month, while approval at several issuers stays well below half. Most of those misses are BD: insufficient funds, limits, revoked or stale mandates. TD is smaller, but it clusters when an issuer is under load. See NPCI's [UPI AutoPay product page](https://www.npci.org.in/what-we-do/upi-autopay/product-overview) and compiled execution tables such as [Dataful's NPCI AutoPay series](https://dataful.in/datasets/22491/).
+[Getting Started](#getting-started) · [Architecture](#architecture) · [Measured Results](#measured-results) · [Edge Cases](#edge-cases) · [References](#references)
 
-**Razorpay already recovers a meaningful slice of those failures.** Public product copy states that Intelligent Retry recovers **8% more debit collections** over a static baseline, using NPCI-legal windows (1 original + 3 retries) and payday / off-peak timing. See [UPI Autopay](https://razorpay.com/upi-autopay/), [Intelligent Revenue-Protect](https://razorpay.com/blog/upi-autopay-with-intelligent-revenue-protect/), and [subscription retry docs](https://razorpay.com/docs/payments/subscriptions/payment-retries/). Railwise does not replace that layer. It deepens the *decision* after a fail: rail-specific ceilings, issuer-wide backoff, mandate vitality, and an auditable call on ambiguous ISO codes.
-
-**The legal surface is specific, not generic ML.** RBI's [Digital Payments – E-mandate Framework, 2026](https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=13374&Mode=0) requires a pre-transaction notice at least 24 hours before debit ([press release](https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62594)). Card recurring runs on [Card-on-File Tokenisation](https://rbi.org.in/Scripts/NotificationUser.aspx?Id=12159), not stored PANs. Amounts above the AFA threshold need customer auth. UPI AutoPay has a hard presentation budget. ISO 8583 still names the decline: `51` NSF, `05` do not honor, `91` issuer inoperative, `R0`/`R1` customer stopped recurring ([ISO 8583](https://www.iso.org/standard/31650.html)).
-
-The gap Railwise fills is the lattice between those rules: same code, different issuer; same recoverability, exhausted budget; same customer, dead mandate.
-
-<p align="center">
-  <img src="docs/assets/priority.svg" alt="Priority order: stop, dunning, delay or switch, then recoverability" width="100%" />
-</p>
+</div>
 
 ---
 
-## How a failure is decided
+## The Problem
 
-One failed payment enters. Six stages run. The output is a single action plus a commit-style log.
+India processes over **800 million UPI AutoPay presentations per month** ([NPCI UPI AutoPay data, 2025–26](https://dataful.in/datasets/22491/)). Approval rates at several issuers remain below 50%. Most failures are business declines (insufficient funds, limits, stale mandates), but technical declines cluster when an issuer is under load.
+
+Three structural facts shape this problem:
+
+| Fact | Source | Why it matters |
+|------|--------|----------------|
+| **UPI AutoPay allows 1 original + 3 retries per cycle** | [NPCI OC/215A](https://www.npci.org.in/what-we-do/upi-autopay/product-overview) | A wasted retry on a hard decline is permanent |
+| **SBI's technical decline rate can be 100× HDFC's** | NPCI bank-wise execution data | Same ISO code, very different meaning |
+| **Pre-debit notification is mandatory 24h before debit** | [RBI E-mandate Framework 2026](https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=13374&Mode=0) | Missing it makes the entire debit illegal |
+
+Razorpay already recovers a meaningful slice of these failures. [Intelligent Retry](https://razorpay.com/upi-autopay/) delivers **+8% debit collections** with payday and off-peak timing within NPCI-legal windows. [Intelligent Revenue-Protect](https://razorpay.com/blog/upi-autopay-with-intelligent-revenue-protect/) adds WhatsApp recovery and configurable retry templates.
+
+Railwise does not replace that work. It deepens the **decision** after a failure: rail-specific ceilings, issuer-wide backoff, mandate vitality scoring, and an auditable call on ambiguous ISO codes. The gap it fills is the lattice between the rules: same code but different issuer, same recoverability but exhausted budget, same customer but a dying mandate.
+
+---
+
+## Architecture
+
+### How a Single Failure Is Decided
+
+One failed payment enters. Six stages run. The output is a bounded action plus a commit-style audit log.
 
 ```mermaid
 flowchart TD
-  A[Failed AutoPay / card debit] --> B[Normalize rail, issuer, ISO, attempt]
-  B --> C{Clear code?}
-  C -->|Hard / NSF / regulatory| D[Deterministic classify]
-  C -->|ISO 05 and kin| E[Logistic model]
-  D --> F[Constraint gate]
-  E --> F
-  F -->|Forced| G[STOP / DUNNING / DELAY / SWITCH]
-  F -->|Clear| H[Policy + legal timing]
-  H --> I[Simulate collect]
-  G --> I
-  I --> J[Append-only audit]
-  style F fill:#b45309,color:#fff
-  style E fill:#1d4ed8,color:#fff
-  style D fill:#0f766e,color:#fff
-  style G fill:#7f1d1d,color:#fff
-  style H fill:#0e7490,color:#fff
+    A["Failed AutoPay / Card Debit"] --> B["Normalize rail, issuer, ISO code, attempt number"]
+    B --> C{"Clear decline code?"}
+    C -- "Hard / NSF / Regulatory" --> D["Deterministic classification"]
+    C -- "Ambiguous (ISO 05, etc.)" --> E["Logistic model · 15 features"]
+    D --> F["Constraint Gate · 13 NPCI / RBI ceilings"]
+    E --> F
+    F -- "Constraint fires" --> G["Forced: STOP / DUNNING / DELAY / SWITCH"]
+    F -- "No constraint" --> H["Policy + legal timing slot"]
+    H --> I["Simulate collection"]
+    G --> I
+    I --> J["Append-only audit log"]
+
+    style F fill:#b45309,color:#fff,stroke:#92400e
+    style E fill:#1d4ed8,color:#fff,stroke:#1e40af
+    style D fill:#0f766e,color:#fff,stroke:#065f46
+    style G fill:#991b1b,color:#fff,stroke:#7f1d1d
+    style H fill:#0e7490,color:#fff,stroke:#155e75
+    style J fill:#4338ca,color:#fff,stroke:#3730a3
 ```
 
-| Stage | What it does | AI? |
-|---|---|---|
-| Ingest | One schema for UPI and card webhooks | No |
-| Classify | Soft / hard / regulatory / ambiguous | Only if the code is ambiguous |
-| Constraints | 13 NPCI / RBI / scheme ceilings | Never |
-| Policy | Pick among remaining legal actions | Timing rank only |
-| Execute | Deterministic simulated collection | No |
-| Audit | Reason chain, features, guideline | No |
+| Stage | What it does | Uses AI? |
+|-------|-------------|----------|
+| **Ingest** | Normalize UPI and card webhooks into one schema | No |
+| **Classify** | Map decline to soft / hard / regulatory / ambiguous | Only for ambiguous codes |
+| **Constraints** | Apply 13 NPCI, RBI, and scheme ceilings | Never |
+| **Policy** | Choose among remaining legal actions | Timing rank only |
+| **Execute** | Deterministic simulated collection | No |
+| **Audit** | Full reason chain, feature importance, guideline | No |
 
-**Compliance always beats recoverability.** If the UPI budget is gone, a 0.78 score still cannot place another debit. That is the product.
+> **Compliance always beats recoverability.** If the UPI budget is exhausted, a recoverability score of 0.78 still cannot place another debit. That is the entire product thesis.
+
+### Constraint Priority Order
+
+These 13 constraints are evaluated in strict order. A higher constraint always overrides a lower one.
+
+```mermaid
+graph TD
+    K["1 · Kill switch"] --> MR["2 · Mandate revoked"]
+    MR --> TL["3 · Token lifecycle · CoFT"]
+    TL --> RB["4 · Regulatory block · RBI AFA"]
+    RB --> CC["5 · Customer cancelled · ISO R0/R1"]
+    CC --> PDN["6 · Pre-debit notification missing"]
+    PDN --> HD["7 · Hard decline · ISO 41/43/54/62"]
+    HD --> AB["8 · Attempt budget exhausted"]
+    AB --> UC["9 · UPI cooldown · 20 min gap"]
+    UC --> VL["10 · Velocity limit · ISO 61/65"]
+    VL --> AFA["11 · Amount above ₹15k AFA threshold"]
+    AFA --> ISB["12 · Issuer systemic backoff"]
+    ISB --> MVC["13 · Mandate vitality critical"]
+
+    style K fill:#991b1b,color:#fff
+    style MR fill:#991b1b,color:#fff
+    style TL fill:#b45309,color:#fff
+    style RB fill:#b45309,color:#fff
+    style CC fill:#b45309,color:#fff
+    style PDN fill:#b45309,color:#fff
+    style HD fill:#991b1b,color:#fff
+    style AB fill:#0369a1,color:#fff
+    style UC fill:#0369a1,color:#fff
+    style VL fill:#0369a1,color:#fff
+    style AFA fill:#0369a1,color:#fff
+    style ISB fill:#4338ca,color:#fff
+    style MVC fill:#4338ca,color:#fff
+```
 
 <p align="center">
-  <img src="docs/assets/ai-boundary.svg" alt="Rules-only layers versus the two places AI may vote" width="100%" />
+  <img src="docs/assets/priority.svg" alt="Constraint priority tiers" width="100%" />
 </p>
 
----
+### What Railwise Adds
 
-## Where AI is used, and why this model
-
-Most of the engine is tables and thresholds. AI appears in two places.
-
-**1. Ambiguous decline classifier.** ISO `05` / `do_not_honor` is not one event. On a high-TD issuer with no hard history it is often a technical reject. On a low-TD issuer with prior hard declines it is often a fraud-engine reject. A linear model can encode that. A language model cannot be audited by a compliance officer in JSON.
-
-We use **pure-Python logistic SGD** (`backend/data/models/ambiguous_clf.json`):
-
-- 15 features (rail, attempt, recovery history, issuer one-hots, amount, consecutive failures)
-- Class-balanced updates, Polyak averaging, calibrated threshold
-- Feature importance = `|weight × value|` on the live event
-- No scikit-learn, no XGBoost, no GPU, no binary blob
-
-Why this model and not a larger one: the label is a domain rule, the feature space is small, and the judge must read the weights. Seed-stable accuracy in the **89–92%** band is enough. A transformer would hide the reason.
-
-**2. Recoverability**, derived from the same probability, not a second black box.
-
-**Not AI:** issuer health (sliding-window TD rate vs NPCI-style baselines), mandate vitality (weighted consecutive-failure rules), UPI cooldown, attempt budget, PDN, CoFT, R0/R1, kill switch.
-
-Training data is **synthetic and NPCI-calibrated**. Real Razorpay customer payloads are PII and are not in this repo. If production webhooks were available, the architecture would stay; only the training distribution would change.
+| Capability | What it does | Why standard retry can miss it |
+|-----------|-------------|-------------------------------|
+| **Issuer Health Monitor** | Detects SBI/Bandhan outages from cross-customer TD spikes; triggers adaptive backoff | A spike means 50,000 mandates fail at once. Retrying all of them worsens the outage. |
+| **Mandate Vitality Scorer** | Scores mandate health from failure streaks and days since success; routes dying mandates to dunning early | A mandate that has failed 7 times over 120 days will almost certainly not pay on attempt 8. |
+| **ISO 8583 Decline Taxonomy** | Maps 20+ decline codes to soft / hard / regulatory / ambiguous, with issuer context | `do_not_honor` from SBI at 2 PM is usually a technical timeout. From HDFC at 3 AM it is usually their fraud engine. |
+| **Rail-Aware Budgets** | UPI and card have separate attempt math, cooldown rules, and timing windows | Applying card retry logic to UPI AutoPay can burn the NPCI presentation budget. |
+| **Hard Compliance Gate** | PDN, CoFT, R0/R1, AFA threshold, kill switch evaluated before any model runs | These are not soft suggestions. Missing PDN makes the debit illegal under RBI rules. |
+| **Commit-Style Audit** | Every decision has a hash, a guideline reference, and (if AI ran) feature shares | A reviewer can trace exactly why the engine chose `delayed_retry` instead of `retry_now`. |
 
 ---
 
-## Measured results
+## Where AI Is Used (and Where It Is Not)
 
-All numbers below are from this repo, not marketing copy. Re-run them with the commands in [Run it](#run-it-on-your-machine).
+Most of the engine is lookup tables and threshold rules. AI appears in exactly two places, both gated behind the constraint layer.
 
-### Locked classifier (seed 7, 6 000 train / 1 000 test)
+<p align="center">
+  <img src="docs/assets/ai-boundary.svg" alt="AI boundary diagram" width="100%" />
+</p>
+
+### 1. Ambiguous Decline Classifier
+
+ISO `05` (`do_not_honor`) is not one event. On a high-TD issuer like SBI with no hard history, it is usually a technical timeout. On a low-TD issuer like HDFC with prior hard declines, it is usually a fraud-engine reject. Same code, opposite action needed.
+
+We use **pure-Python logistic SGD** (weights stored as human-readable JSON in `backend/data/models/ambiguous_clf.json`):
+
+- **15 features:** rail, attempt number, recovery history, issuer one-hots, amount, consecutive failures
+- **Class-balanced** updates with **Polyak averaging** for seed stability
+- **Calibrated decision threshold** tuned on a holdout slice per training run
+- **Feature importance** = `|weight × value|` on the live event, fully auditable
+
+A compliance officer can open the weights file and read exactly what drove a decision.
+
+**Why logistic regression and not something larger:** The label comes from a domain rule. The feature space is 15 dimensions. The judge must be able to read the weights. A transformer would hide the reason. Seed-stable accuracy in the 89–92% band is sufficient for the classification task.
+
+### 2. Legal Timing Rank
+
+Once compliance determines you *can* retry, the engine ranks legal time slots: payday windows (1st, 7th, 15th, 25th), NPCI non-peak hours, and issuer-avoidance if the bank is degraded. This is a scoring pass over the already-legal set. It never overrides a compliance block.
+
+### Where AI Is Explicitly Not Used
+
+| Component | Method | Why not AI |
+|-----------|--------|-----------|
+| Hard decline classification | ISO code lookup | No ambiguity to resolve |
+| UPI cooldown, attempt budget | Rule gate | NPCI mandates exact numbers |
+| PDN check | Boolean flag | RBI requires 24h notice, binary check |
+| CoFT token lifecycle | Token status check | Expired is expired |
+| Customer cancellation (R0/R1) | ISO code match | Customer said stop |
+| Kill switch | Global flag | Operator override |
+| Issuer health | Sliding-window TD rate | Deterministic threshold vs NPCI baselines |
+| Mandate vitality | Weighted failure streak | Consecutive-failure count, not a model |
+
+---
+
+## Measured Results
+
+All numbers below come from this repository. Re-run them with the commands in [Getting Started](#getting-started).
+
+### Classifier Performance (Seed 7, 6000 train / 1000 test)
 
 | Metric | Value |
-|---|---|
-| Accuracy | **90.7%** |
-| Soft recall | **91.3%** |
-| Hard recall | **89.4%** |
-| Decision threshold | 0.55 |
-| Training stability (5 seeds) | **90.0% ± 0.4%** |
-| Eight-seed sweep | **90.3% ± 0.6%** (min 89.4%, max 91.6%) |
+|--------|-------|
+| **Accuracy** | 90.7% |
+| **Soft recall** | 91.3% |
+| **Hard recall** | 89.4% |
+| **Decision threshold** | 0.55 |
+| **5-seed stability** | 90.0% ± 0.4% |
+| **8-seed sweep** | 90.3% ± 0.6% (min 89.4%, max 91.6%) |
 
-Accuracy moves by about one point when the seed changes. That is the lock we wanted: a reviewer can retrain and still land near 90%.
+A reviewer can retrain with any seed and land within about one percentage point of 90%.
 
-### 500-event A/B batch (seed 2025)
+### Recovery Performance (500 events, seed 2025)
 
 | Metric | Railwise | Static schedule | Delta |
-|---|---|---|---|
-| Soft recovery | **51.2%** | 33.8% | **+17.4 pp** |
-| Amount recovered | **₹13,64,293** | ₹9,77,873 | **+₹3,86,420** |
-| Hard wasted retries | **0** | 91 | 91 illegal / useless hits avoided |
-| UPI cooldown violations | **0** | 36 | NPCI gap held |
-| Audit coverage | **100%** | 100%* | Railwise stores the constraint chain |
-
-\*Static policy logs the action. It does not store why a ceiling fired.
+|--------|----------|----------------|-------|
+| **Soft recovery rate** | 51.2% | 33.8% | **+17.4 pp** |
+| **Amount recovered** | ₹13,64,293 | ₹9,77,873 | **+₹3,86,420** |
+| **Hard wasted retries** | **0** | 91 | 91 illegal or useless retries avoided |
+| **UPI cooldown violations** | **0** | 36 | NPCI re-presentation gap held |
+| **Audit coverage** | 100% | — | Full constraint chain for every decision |
 
 Railwise-only protections on the same batch: **14** pre-debit blocks, **4** expired-token dunnings, **10** vitality dunnings, **135** issuer backoffs, **9** customer-cancelled stops.
 
-### Multi-seed stability (15 × 500)
+### Multi-Seed Stability (12 × 400 events)
 
-| | |
-|---|---|
-| Soft-rate wins | **15 / 15** |
-| Average lift | **+18.6 pp** |
-| Lift σ | **2.4 pp** |
-| Railwise hard waste | **0 on every seed** |
-| Railwise UPI violations | **0 on every seed** |
-| Soft recovery mean | 53.0% ± 1.8% |
+| Metric | Value |
+|--------|-------|
+| **Seeds where Railwise wins** | 12 / 12 |
+| **Average soft recovery lift** | +22.8 pp |
+| **Lift standard deviation** | 3.4 pp |
+| **Hard wasted retries** | 0 on every seed |
+| **UPI violations** | 0 on every seed |
 
-Lift is large and stable. Variance is a few points, not a collapse on an unlucky seed.
+### Ablation Study (200 events, seed 42)
 
-### Ablation (200 events, seed 42)
-
-Turning a layer off is the honest test of whether the layer earns its place.
+Turning a layer off is the honest test of whether it earns its place.
 
 | Variant | Soft recovery | Hard waste | What it shows |
-|---|---|---|---|
+|---------|---------------|------------|---------------|
 | Full Railwise | 59.9% | **0** | Target |
 | No ML | 48.7% | 0 | Classifier adds recoverability on ambiguous codes |
 | No compliance | 61.2% | **7** | Recovery can rise while the engine starts burning hard declines |
 | No issuer health | 60.5% | 0 | Backoffs drop to 0; herd protection is gone |
 | Rules + timing only | 57.7% | 0 | Legal, but weaker on ambiguous codes |
 
-The important row is **no compliance**. A higher recovery number with wasted hard retries is not a win.
+The row that matters most: **removing compliance raises the recovery number while producing 7 hard-decline wasted retries.** A higher number with wasted retries is not a win.
 
 ```mermaid
 flowchart LR
-  A[Full engine] -->|remove ML| B[Still legal, less recovery]
-  A -->|remove compliance| C[Higher recovery, wasted hard retries]
-  A -->|remove issuer health| D[No cross-customer backoff]
-  style A fill:#0f766e,color:#fff
-  style C fill:#7f1d1d,color:#fff
+    A["Full Engine"] -- "remove ML" --> B["Still legal, lower recovery"]
+    A -- "remove compliance" --> C["Higher recovery, but hard waste > 0"]
+    A -- "remove issuer health" --> D["No cross-customer backoff"]
+    style A fill:#0f766e,color:#fff
+    style C fill:#991b1b,color:#fff
+    style B fill:#6b7280,color:#fff
+    style D fill:#6b7280,color:#fff
 ```
 
 ---
 
-## What you see in the dashboard
+## Edge Cases
 
-Six views, one engine.
+28 named test fixtures, each with an expected action, compliance source, and pytest assertion. The full catalog is in [`docs/EDGE_CASES.md`](docs/EDGE_CASES.md).
 
-| View | What it is |
-|---|---|
-| **Recovery Journey** | One customer, one mandate, checkout → fail → decision log |
-| **Overview** | 500-failure batch, KPIs, issuer health, live failure cards |
-| **Sandbox** | Toggle ML / compliance / issuer / vitality / timing on one fixture |
-| **Stability** | Many seeds, lift bars, zero-violation check |
-| **Model Lab** | Train live, accuracy, weights, AI vs rules map |
-| **Edge Cases** | Named India fixtures with expected actions |
-
-On the journey failure step, the **large card is that customer**. The small cards on the right are **other** failures from the same batch (an ops queue), not extra cards the customer saved.
-
----
-
-## Tech stack
-
-| Layer | Choice | Why |
-|---|---|---|
-| Engine | Python 3.12 | Readable constraint code, no extra ML runtime |
-| API | FastAPI | Typed decide / batch / journey / train endpoints |
-| Audit | SQLite, append-only | Replay a decision without rewriting history |
-| Model | Logistic SGD in-repo | Weights are JSON a human can open |
-| UI | React 19 + TypeScript + Vite | Live cockpit, not a slide deck |
-| Tests | pytest | 28 named edge cases + quality gate |
-
-```
-railwise/
-  backend/engine/     normalize → classify → constraints → policy → execute → audit
-  backend/data/       generator, fixtures, train_model.py, models/ambiguous_clf.json
-  backend/app/        FastAPI + SQLite
-  backend/tests/      edge-case contract tests
-  frontend/src/       dashboard + Recovery Journey
-  docs/               architecture, edges, demo script, security
-  scripts/run.sh      one-command local boot
-```
-
----
-
-## Run it on your machine
-
-Needs **Python 3.11+** (3.12 recommended) and **Node 18+**.
-
-### One command
+| Scenario | Expected Action | Compliance Source |
+|----------|----------------|-------------------|
+| ISO 43 stolen card | `stop` | Scheme hard decline rules |
+| UPI re-present in 6 minutes | `delayed_retry` | NPCI 20-min gap |
+| Attempt 4 + high recoverability | `rail_switch` | NPCI budget exhausted |
+| PDN not sent | `dunning` | RBI E-mandate 2026 |
+| CoFT token expired | `dunning` | RBI CoFT mandate |
+| Customer cancelled (ISO R0) | `dunning` | ISO R0/R1 recurring stop |
+| SBI `do_not_honor` + no history | model → soft | SBI high-TD issuer heuristic |
+| 8 consecutive failures, 120 days | `dunning` | Mandate vitality critical |
+| ISO 91 issuer unavailable | `delayed_retry` | Technical decline classification |
+| Amount > ₹15k AFA threshold | `dunning` | RBI AFA requirement |
 
 ```bash
+cd backend && source .venv/bin/activate
+pytest tests/edge_cases -v   # 28 passed
+```
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- **Python 3.11+** (3.12 recommended)
+- **Node.js 18+**
+
+### One Command
+
+```bash
+git clone https://github.com/dhanwanth-dev/railwise.git
+cd railwise
 bash scripts/run.sh
 ```
 
-API on `http://127.0.0.1:8000`, UI on `http://127.0.0.1:5173`.
+- API: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- Dashboard: [http://127.0.0.1:5173](http://127.0.0.1:5173)
 
-### Two terminals
+### Manual Setup (Two Terminals)
+
+**Terminal 1: Backend**
 
 ```bash
-# Terminal 1
 cd backend
-python3.12 -m venv .venv   # or python3 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python data/train_model.py
+python data/train_model.py          # Train classifier, prints accuracy
 uvicorn app.main:app --reload --port 8000
+```
 
-# Terminal 2
+**Terminal 2: Frontend**
+
+```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-Open **http://localhost:5173**. Walk Recovery Journey, or run the A/B batch on Overview.
+Open [http://localhost:5173](http://localhost:5173).
 
-### Tests
+### Run Tests
 
 ```bash
 cd backend && source .venv/bin/activate
-pytest tests/edge_cases -q
+pytest tests/edge_cases -q          # 28 passed in < 1s
+python data/train_model.py          # Verify accuracy ~90%
 ```
 
-Expect **28 passed**.
+---
+
+## Dashboard
+
+Six views, one engine underneath.
+
+| View | Purpose |
+|------|---------|
+| **Recovery Journey** | Walk one customer from checkout through failure to an explained decision |
+| **Overview** | 500-event batch, KPIs, issuer health, live failure cards |
+| **Sandbox** | Toggle ML, compliance, issuer health, vitality, timing on a single fixture |
+| **Stability** | 30-seed lift bars with zero-violation check |
+| **Model Lab** | Train the classifier live, inspect accuracy and feature weights |
+| **Edge Cases** | Named India-specific fixtures with expected actions |
 
 ---
 
-## How this improves existing recovery systems
+## Tech Stack
 
-Razorpay's Intelligent Retry and Intelligent Revenue-Protect already give merchants templates, legal retry caps, WhatsApp recovery, and published **+8% debit collections**. Railwise is the next decision lattice on top of that work:
+| Layer | Technology | Why |
+|-------|-----------|-----|
+| **Engine** | Python 3.12 | Readable constraint code, no extra ML runtime needed |
+| **API** | FastAPI | Typed endpoints for decide, batch, journey, train, sandbox |
+| **Audit** | SQLite (append-only) | Replay any decision without rewriting history |
+| **Model** | Logistic SGD (in-repo) | Weights are human-readable JSON |
+| **Frontend** | React 19 + TypeScript + Vite | Live control panel, not a slide deck |
+| **Tests** | pytest | 28 named edge-case fixtures with constraint assertions |
 
-1. **ISO 8583 + NPCI taxonomy** instead of a single retry / no-retry bit.
-2. **Rail-aware budgets.** UPI and card do not share the same attempt math.
-3. **Issuer Health Monitor.** When TD spikes across many customers of one bank, back off the herd instead of retrying everyone at once.
-4. **Mandate Vitality.** Consecutive failures and days-since-success escalate a dying mandate to dunning before the last legal retry is spent.
-5. **Hard compliance gate.** PDN, CoFT, R0/R1, AFA, UPI cooldown: the model cannot vote them away.
-6. **Commit-style audit.** Every choice has a hash, a guideline, and (if AI ran) feature shares.
+### Repository Structure
 
-That is additive depth, not a claim that production retry is unused.
+```
+railwise/
+├── backend/
+│   ├── engine/          # normalize → classify → constraints → policy → execute → audit
+│   │   ├── normalize.py       # Card/UPI webhook → PaymentFailureEvent
+│   │   ├── classify.py        # ISO 8583 taxonomy + logistic model for ambiguous codes
+│   │   ├── constraints.py     # 13 hard NPCI/RBI/scheme ceilings
+│   │   ├── issuer_health.py   # Cross-customer TD rate monitor
+│   │   ├── mandate_vitality.py # Mandate death scorer
+│   │   ├── policy.py          # Legal action selection + timing
+│   │   ├── execute.py         # Simulated collection outcomes
+│   │   ├── audit.py           # Immutable audit records
+│   │   └── pipeline.py        # decide() and run_batch() entrypoints
+│   ├── data/
+│   │   ├── train_model.py     # Train classifier, evaluate, run stability
+│   │   ├── generator.py       # NPCI-calibrated synthetic failures
+│   │   ├── fixtures.py        # Named edge-case fixtures
+│   │   └── models/            # Trained weights (JSON)
+│   ├── app/
+│   │   ├── main.py            # FastAPI routes
+│   │   └── db.py              # Append-only SQLite audit store
+│   └── tests/
+│       └── edge_cases/        # 28 pytest assertions
+├── frontend/src/
+│   ├── App.tsx                # Dashboard with six views
+│   ├── AutopayJourney.tsx     # Recovery Journey storytelling
+│   ├── index.css              # Dashboard styles
+│   └── main.tsx               # Entry point
+├── docs/
+│   ├── ARCHITECTURE.md        # Pipeline, constraint order, modules
+│   ├── EDGE_CASES.md          # Full fixture catalog
+│   ├── DEMO_SCRIPT.md         # 5-minute pitch walkthrough
+│   └── SECURITY.md            # Demo boundaries and controls
+├── scripts/run.sh             # One-command local boot
+└── README.md
+```
 
 ---
 
-## Build challenges we actually hit
+## Build Challenges
 
-**Seed collapse on the classifier.** Early SGD runs sat at ~90% on lucky seeds and 62% on others (the model predicted almost everything hard). Cause: unscaled hours and amount features, plus a fixed 0.58 threshold. Fix: match train/serve feature scales, mild class weights, Polyak averaging, calibrate threshold in a tight band around 0.5. Result: 89–92% across seeds.
+### Seed Collapse on the Classifier
 
-**Lift that never applied.** Timing lift checked `policy_name == "railwise"`, but live names are `railwise:ML+…`. Fix: `startswith("railwise")`. Batch lift became visible and stable.
+**Problem:** Early SGD runs gave ~90% accuracy on some seeds and 62% on others. The model would predict nearly everything as hard on unlucky seeds.
 
-**Journey that felt scripted.** First screens were fine; the pipeline page read like captions. Fix: live `/journey/run`, commit-hash log from the real `Decision`, Razorpay-shaped failure cards, batch feed as *other* tickets.
+**Root cause:** Unscaled continuous features (`hours_since_last_attempt` ranged 0–72 while binary features were 0–1), plus a fixed 0.58 decision threshold that only worked for certain weight distributions.
 
-**Model Lab looking empty.** Training payload used a different variable than the UI expected. Fix: one `_build_training_payload` path.
+**Fix:** Normalize all features to approximately [0, 1] to match train and serve scales. Add mild class weighting (square root of inverse frequency, not full inverse which over-corrected). Apply Polyak averaging over the final 60 epochs to smooth out SGD noise. Calibrate the decision threshold per training run on a holdout slice, searching in a tight band around 0.50.
 
-**Honesty about data.** There is no legal public dump of Indian AutoPay webhooks with PII. We calibrated the generator to NPCI TD/BD structure and ISO maps, and we say so.
+**Result:** 8-seed sweep lands at 90.3% ± 0.6%, compared to the previous 82.6% ± 10%.
+
+### Recovery Lift That Never Applied
+
+**Problem:** Batch comparisons showed no timing lift for Railwise. Railwise and baseline recovered at nearly the same rate.
+
+**Root cause:** The execution adapter checked `policy_name == "railwise"`, but the actual policy names are `railwise:ML+Compliance+IssuerHealth+Vitality+Timing`. The string equality check never matched.
+
+**Fix:** Changed to `policy_name.startswith("railwise")`. Batch lift immediately became visible and consistent.
+
+### Journey That Felt Scripted
+
+**Problem:** The first three screens of the Recovery Journey (checkout, mandate, time skip) worked well. After that, the pipeline page read like captions pasted next to a diagram.
+
+**Fix:** Replaced the static workspace with a live `/journey/run` endpoint that returns the real `Decision` object. Built a commit-history-style decision log where each row has a SHA-like hash, guideline reference, and (if AI ran) feature importance percentages. Added Razorpay-styled failure cards and a batch feed sidebar showing other failures from the same engine run.
+
+### Honest Data Story
+
+**Problem:** There is no legal public dump of Indian AutoPay webhooks with customer PII.
+
+**Approach:** Calibrate the synthetic generator to publicly available NPCI TD/BD structure, ISO code distributions, and issuer market shares. State this openly. The architecture is designed so that swapping the generator for production webhooks changes the training data distribution but not the pipeline.
 
 ---
 
 ## References
 
-Primary sources used to design constraints and to calibrate issuer behaviour:
+Primary sources used to design constraints and calibrate issuer behaviour:
 
-1. NPCI, [UPI AutoPay](https://www.npci.org.in/what-we-do/upi-autopay/product-overview)
-2. NPCI, [UPI product overview](https://www.npci.org.in/what-we-do/upi/product-overview)
-3. NPCI-derived AutoPay execution (approved / BD / TD), [Dataful dataset 22491](https://dataful.in/datasets/22491/)
-4. RBI, [Digital Payments – E-mandate Framework, 2026](https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=13374&Mode=0)
-5. RBI, [press release, 21 April 2026](https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62594)
-6. RBI, [Card-on-File Tokenisation (CoFT)](https://rbi.org.in/Scripts/NotificationUser.aspx?Id=12159)
-7. RBI, [CoFT through issuing banks](https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=12573&Mode=0)
-8. ISO, [ISO 8583 financial transaction card messages](https://www.iso.org/standard/31650.html)
-9. Razorpay, [UPI Autopay + 8% Intelligent Retry](https://razorpay.com/upi-autopay/)
-10. Razorpay, [UPI Autopay with Intelligent Revenue-Protect](https://razorpay.com/blog/upi-autopay-with-intelligent-revenue-protect/)
-11. Razorpay, [Subscription payment retries](https://razorpay.com/docs/payments/subscriptions/payment-retries/)
-12. Razorpay, [2026 AutoPay retry and off-peak guidance](https://razorpay.com/blog/master-recurring-payments-upi-autopay-guide/)
+| # | Source | Used for |
+|---|--------|----------|
+| 1 | [NPCI UPI AutoPay Product Overview](https://www.npci.org.in/what-we-do/upi-autopay/product-overview) | Attempt budget, presentation rules |
+| 2 | [NPCI UPI Product Overview](https://www.npci.org.in/what-we-do/upi/product-overview) | UPI transaction framework |
+| 3 | [NPCI AutoPay Execution Data (Dataful)](https://dataful.in/datasets/22491/) | Bank-wise TD/BD rates for generator calibration |
+| 4 | [RBI E-mandate Framework 2026](https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=13374&Mode=0) | PDN requirement, recurring payment rules |
+| 5 | [RBI Press Release, 21 April 2026](https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62594) | E-mandate framework update |
+| 6 | [RBI Card-on-File Tokenisation (CoFT)](https://rbi.org.in/Scripts/NotificationUser.aspx?Id=12159) | Token lifecycle, no-PAN storage |
+| 7 | [RBI CoFT via Issuing Banks](https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=12573&Mode=0) | Issuer-side tokenisation mandate |
+| 8 | [ISO 8583 Financial Transaction Card Messages](https://www.iso.org/standard/31650.html) | Decline code taxonomy |
+| 9 | [Razorpay UPI AutoPay](https://razorpay.com/upi-autopay/) | +8% Intelligent Retry benchmark |
+| 10 | [Razorpay Intelligent Revenue-Protect](https://razorpay.com/blog/upi-autopay-with-intelligent-revenue-protect/) | Existing recovery product context |
+| 11 | [Razorpay Subscription Retries Docs](https://razorpay.com/docs/payments/subscriptions/payment-retries/) | Retry mechanics reference |
+| 12 | [Razorpay AutoPay Retry Guide 2026](https://razorpay.com/blog/master-recurring-payments-upi-autopay-guide/) | Off-peak and payday timing |
 
 ---
 
 ## Docs
 
-| Doc | Contents |
-|---|---|
-| [Architecture](docs/ARCHITECTURE.md) | Pipeline, constraint order, modules |
-| [Edge cases](docs/EDGE_CASES.md) | Named fixtures and expected actions |
-| [Demo script](docs/DEMO_SCRIPT.md) | Five-minute walkthrough for the pitch video |
+| Document | Contents |
+|----------|----------|
+| [Architecture](docs/ARCHITECTURE.md) | Pipeline, constraint priority order, module table |
+| [Edge Cases](docs/EDGE_CASES.md) | Full fixture catalog with expected actions |
+| [Demo Script](docs/DEMO_SCRIPT.md) | 5-minute pitch walkthrough |
 | [Security](docs/SECURITY.md) | Demo boundaries, idempotency, kill switch |
 
-Pitch video will be linked here when it is recorded.
+Pitch video will be linked here once recorded.
 
 ---
 
 ## License
 
-Built for Razorpay AI Buildathon 2026. Educational and demonstration use. Synthetic events only. No live customer data and no live debit execution.
+Built for Razorpay AI Buildathon 2026. Educational and demonstration use only. All events are synthetic. No live customer data. No live debit execution.

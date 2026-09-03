@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react'
-import './App.css'
 import AutopayJourney from './AutopayJourney'
 
 const API = '/api'
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// Types
 
 type Metrics = {
   soft_recovery_rate: number
@@ -131,7 +130,7 @@ const DEFAULT_TOGGLES: Toggles = {
   use_timing_ai: true,
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 
 function inr(paise: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(paise / 100)
@@ -145,7 +144,7 @@ function actionClass(action: string) {
   return `action-badge action-${action}`
 }
 
-// ── App ──────────────────────────────────────────────────────────────────────
+// App
 
 function hasValidTraining(t: TrainingResult | null | undefined): t is TrainingResult {
   return !!(t && t.metrics && typeof t.metrics.accuracy === 'number')
@@ -404,7 +403,7 @@ export default function App() {
                 </section>
               </>
             ) : (
-              <EmptyState message="Run an A/B batch to populate the dashboard" action={runBatch} actionLabel="Run Batch" />
+              <EmptyState message="Run a batch to see recovery metrics" action={runBatch} actionLabel="Run Batch" />
             )}
           </div>
         )}
@@ -534,7 +533,7 @@ export default function App() {
                   <KpiCard label="Accuracy" value={pct(training.metrics.accuracy)} delta="held-out test" positive={training.metrics.accuracy >= 0.85} />
                   <KpiCard label="Soft Recall" value={pct(training.metrics.soft_recall)} delta="recoverable declines" positive />
                   <KpiCard label="Hard Recall" value={pct(training.metrics.hard_recall)} delta="non-retryable declines" positive />
-                  <KpiCard label="Quality Gate" value={training.quality_passed ? 'PASSED' : 'FAILED'} delta="acc 87 to 94%, hard recall ≥ 65%" positive={training.quality_passed} />
+                  <KpiCard label="Quality Gate" value={training.quality_passed ? 'PASSED' : 'FAILED'} delta="acc 87–94%, hard recall ≥ 65%" positive={training.quality_passed} />
                 </div>
 
                 <div className="two-col">
@@ -553,7 +552,7 @@ export default function App() {
                     </div>
                   </section>
                   <section className="card">
-                    <h2>Feature weights</h2>
+                    <h2>Feature Weights</h2>
                     <div className="weight-list">
                       {(training.feature_weights || []).map((fw) => (
                         <div key={fw.feature} className="weight-row">
@@ -597,7 +596,7 @@ export default function App() {
                 </section>
               </>
             ) : (
-              <EmptyState message="Train the ambiguous-decline classifier live" action={() => runTraining(true)} actionLabel="Train Model" />
+              <EmptyState message="Train the ambiguous decline classifier" action={() => runTraining(true)} actionLabel="Train Model" />
             )}
           </div>
         )}
@@ -774,7 +773,7 @@ export default function App() {
   )
 }
 
-// ── Sub-components ─────────────────────────────────────────────────────────
+// Sub-components
 
 function KpiCard({ label, value, delta, positive }: { label: string; value: string; delta: string; positive?: boolean }) {
   return (
