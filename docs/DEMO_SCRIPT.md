@@ -42,11 +42,11 @@ Four — **ISO 8583 decline taxonomy**: 'do_not_honor' from SBI at 2 PM is likel
 Open the cockpit at `http://localhost:5173`.  
 Click **Run 500-failure A/B batch**.
 
-Point at numbers:
-- Railwise: **48.4% soft recovery** vs baseline 45.0% — **+3.4 percentage points**
-- Railwise recovered **₹9,34,818** vs baseline ₹8,81,029 — **+₹53,789 in one batch**
-- Hard wasted retries: **0** (non-negotiable guarantee)
-- UPI cooldown violations: **0** (non-negotiable guarantee)
+Point at numbers (500 events, seed 2025):
+- Railwise: **51.2% soft recovery** vs static 33.8%  →  **+17.4 percentage points**
+- Amount recovered: **₹13,64,293** vs ₹9,77,873
+- Hard wasted retries: **0** (91 on the static schedule)
+- UPI cooldown violations: **0** (36 on the static schedule)
 - Audit coverage: **100%**
 
 **Step 2 — New compliance protections (Railwise-only)**
@@ -55,7 +55,7 @@ Point at the compliance panel:
 - 14 events **blocked** because pre-debit notification wasn't sent (RBI rule)
 - 4 **token dunnings** — CoFT tokens had expired, retrying would loop forever
 - 10 **mandate vitality dunnings** — caught near-dead mandates before the retry budget ran out
-- 134 **issuer adaptive backoffs** — SBI was CRITICAL, we delayed those retries so we didn't make the outage worse
+- 135 **issuer adaptive backoffs** — SBI was CRITICAL, we delayed those retries so we didn't make the outage worse
 
 **Step 3 — Issuer health panel**
 
@@ -103,7 +103,7 @@ We saved 3 retry attempts (which cost per-attempt in production) for mandates th
 
 "Where is AI used exactly? Two places.
 
-One — ambiguous decline codes. ISO 05 'do_not_honor' goes to a logistic SGD model with 15 auditable features. Top features: `prior_hard_declines` (strong hard signal), `issuer_is_sbi` (high false-decline rate → lean soft), `attempt_number` (diminishing returns). Accuracy: 89.3%. Soft recall: 96.1%.
+One — ambiguous decline codes. ISO 05 'do_not_honor' goes to a logistic SGD model with 15 auditable features. Top features: `prior_hard_declines` (strong hard signal), `issuer_is_sbi` (high false-decline rate → lean soft), `attempt_number` (diminishing returns). Accuracy: 90.7%. Soft recall: 91.3%. Hard recall: 89.4%. Seed sweep stays in the 89–92% band.
 
 Two — ranking *already-legal* timing slots. Once compliance says you can retry, AI picks the best slot: payday windows (1st, 7th, 15th, 25th), NPCI non-peak hours, issuer avoidance if degraded.
 
@@ -119,7 +119,7 @@ Hard declines, UPI attempt caps, cooldowns, kill switch — these never get a mo
 
 ## Recording checklist
 
-- [ ] Show terminal: `python data/train_model.py` → print accuracy 89.3%, soft recall 96.1%
+- [ ] Show terminal: `python data/train_model.py` → print accuracy ~90.7%, soft recall ~91%
 - [ ] Show terminal: `pytest tests/ -q` → 28 passed
 - [ ] Run the 500-event A/B batch in the cockpit
 - [ ] Show issuer health panel (SBI CRITICAL, HDFC HEALTHY)

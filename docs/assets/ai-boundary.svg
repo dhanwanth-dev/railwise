@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 280" role="img" aria-label="Where AI is allowed and where it is not">
+  <rect width="1100" height="280" rx="18" fill="#f8fafc"/>
+  <rect x="1" y="1" width="1098" height="278" rx="18" fill="none" stroke="#e2e8f0"/>
+  <text x="36" y="42" fill="#0f172a" font-family="Inter, system-ui, sans-serif" font-size="20" font-weight="700">AI is defensive. Compliance always wins.</text>
+  <text x="36" y="68" fill="#475569" font-family="Inter, system-ui, sans-serif" font-size="14">The model never chooses money movement when a rule already forbids it.</text>
+
+  <rect x="36" y="96" width="500" height="150" rx="14" fill="#ecfdf5" stroke="#6ee7b7"/>
+  <text x="56" y="128" fill="#047857" font-family="Inter, system-ui, sans-serif" font-size="13" font-weight="800" letter-spacing="1">RULES ONLY</text>
+  <text x="56" y="156" fill="#134e4a" font-family="Inter, system-ui, sans-serif" font-size="14">Hard declines  ·  UPI cooldown  ·  attempt budget</text>
+  <text x="56" y="180" fill="#134e4a" font-family="Inter, system-ui, sans-serif" font-size="14">RBI 24h pre-debit  ·  CoFT token life  ·  ISO R0/R1</text>
+  <text x="56" y="204" fill="#134e4a" font-family="Inter, system-ui, sans-serif" font-size="14">Issuer backoff  ·  mandate vitality  ·  kill switch</text>
+
+  <rect x="564" y="96" width="500" height="150" rx="14" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="584" y="128" fill="#1d4ed8" font-family="Inter, system-ui, sans-serif" font-size="13" font-weight="800" letter-spacing="1">AI MAY VOTE</text>
+  <text x="584" y="156" fill="#1e3a8a" font-family="Inter, system-ui, sans-serif" font-size="14">Ambiguous codes only  (ISO 05 do_not_honor)</text>
+  <text x="584" y="180" fill="#1e3a8a" font-family="Inter, system-ui, sans-serif" font-size="14">Recoverability score after the gate is clear</text>
+  <text x="584" y="204" fill="#1e3a8a" font-family="Inter, system-ui, sans-serif" font-size="14">Timing rank among already-legal slots</text>
+</svg>
