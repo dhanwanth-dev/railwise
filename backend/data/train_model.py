@@ -71,7 +71,7 @@ def _make_sample(rng: random.Random) -> dict:
         "bias": 1.0,
     }
 
-    # Label derivation (domain-calibrated rules → labels for logistic regression)
+    # Label derivation uses raw counts before feature scaling
     soft = 1
 
     # Hard signals
@@ -109,7 +109,18 @@ def _make_sample(rng: random.Random) -> dict:
         recov = rng.uniform(base - 0.10, min(0.92, base + 0.10))
 
     recov = max(0.02, min(0.95, recov))
-    return {"features": feats, "soft": soft, "recoverability": recov}
+
+    # Match classify._features scaling so train/serve stay aligned
+    scaled = {
+        **feats,
+        "attempt_number": feats["attempt_number"] / 4.0,
+        "prior_soft_recoveries": feats["prior_soft_recoveries"] / 4.0,
+        "prior_hard_declines": feats["prior_hard_declines"] / 3.0,
+        "hours_since_last_attempt": min(feats["hours_since_last_attempt"], 72.0) / 24.0,
+        "amount_scaled": min(feats["amount_scaled"], 20.0) / 10.0,
+        "consecutive_failures": feats["consecutive_failures"] / 4.0,
+    }
+    return {"features": scaled, "soft": soft, "recoverability": recov}
 
 
 def evaluate_model(bundle: dict, samples: list[dict]) -> dict[str, float]:
@@ -118,6 +129,7 @@ def evaluate_model(bundle: dict, samples: list[dict]) -> dict[str, float]:
     Recoverability is computed using the same proba_soft-based approach as _model_ambiguous.
     """
     clf_w = bundle["clf_weights"]
+    thr = float(bundle.get("decision_threshold", 0.50))
     fn = FEATURE_NAMES
 
     correct = 0
@@ -131,12 +143,14 @@ def evaluate_model(bundle: dict, samples: list[dict]) -> dict[str, float]:
         y = s["soft"]
         z = sum(clf_w.get(k, 0.0) * feats.get(k, 0.0) for k in fn)
         proba_soft = _sigmoid(z)
-        pred_soft = 1 if proba_soft >= 0.58 else 0  # match classify.py threshold
+        pred_soft = 1 if proba_soft >= thr else 0
 
-        # Match the inference code in classify._model_ambiguous
+        # Match the inference code in classify._model_ambiguous (scaled features)
         base_recov = proba_soft * 0.82
-        cf_penalty = feats.get("consecutive_failures", 0.0) * 0.07
-        attempt_penalty = max(0.0, feats.get("attempt_number", 1.0) - 1) * 0.08
+        cf_raw = feats.get("consecutive_failures", 0.0) * 4.0
+        attempt_raw = feats.get("attempt_number", 0.25) * 4.0
+        cf_penalty = cf_raw * 0.07
+        attempt_penalty = max(0.0, attempt_raw - 1.0) * 0.08
         pred_recov = max(0.04, min(0.90, base_recov - cf_penalty - attempt_penalty))
 
         if pred_soft == y:
@@ -161,13 +175,14 @@ def evaluate_model(bundle: dict, samples: list[dict]) -> dict[str, float]:
         "hard_recall": round(hard_correct / true_hard, 4) if true_hard else 0,
         "avg_recov_soft": round(soft_recov_sum / soft_recov_n, 4) if soft_recov_n else 0,
         "avg_recov_hard": round(hard_recov_sum / hard_recov_n, 4) if hard_recov_n else 0,
+        "decision_threshold": thr,
         "n_samples": n,
         "n_soft": true_soft,
         "n_hard": true_hard,
     }
 
 
-def run_training(*, train_seed: int = 7, n_train: int = 3000, n_test: int = 600) -> dict:
+def run_training(*, train_seed: int = 7, n_train: int = 6000, n_test: int = 1000) -> dict:
     """Train model and return metrics + top weights (for API / live UI)."""
     rng = random.Random(train_seed)
     all_samples = [_make_sample(rng) for _ in range(n_train + n_test)]
@@ -184,6 +199,15 @@ def run_training(*, train_seed: int = 7, n_train: int = 3000, n_test: int = 600)
         for feat, w in top_weights if feat != "bias"
     ]
 
+    acc = metrics["accuracy"]
+    # Target band ~89–91% with usable hard recall; allow slight seed drift.
+    quality = (
+        acc >= 0.87
+        and acc <= 0.94
+        and metrics["hard_recall"] >= 0.65
+        and metrics["soft_recall"] >= 0.80
+    )
+
     return {
         "train_seed": train_seed,
         "n_train": n_train,
@@ -191,7 +215,8 @@ def run_training(*, train_seed: int = 7, n_train: int = 3000, n_test: int = 600)
         "metrics": metrics,
         "feature_weights": feature_weights,
         "model_path": str(ROOT / "data" / "models" / "ambiguous_clf.json"),
-        "quality_passed": metrics["accuracy"] >= 0.72 and metrics["hard_recall"] >= 0.60,
+        "quality_passed": quality,
+        "model_version": bundle.get("version", "2.2"),
     }
 
 
@@ -203,6 +228,7 @@ def main() -> None:
     print(f"  Accuracy:          {metrics['accuracy']:.1%}")
     print(f"  Soft recall:       {metrics['soft_recall']:.1%}")
     print(f"  Hard recall:       {metrics['hard_recall']:.1%}")
+    print(f"  Threshold:         {metrics.get('decision_threshold', 0.5):.2f}")
     print(f"  Avg recov (soft):  {metrics['avg_recov_soft']:.3f}")
     print(f"  Avg recov (hard):  {metrics['avg_recov_hard']:.3f}")
     print(f"\n  Samples: {metrics['n_samples']} ({metrics['n_soft']} soft / {metrics['n_hard']} hard)")
@@ -211,7 +237,7 @@ def main() -> None:
         print(f"  {fw['feature']:<35} {fw['weight']:+.4f}  → {fw['direction']}")
     print(f"\nModel saved to {result['model_path']}")
     assert result["quality_passed"]
-    print("\n✓ Quality thresholds passed (accuracy ≥ 72%, hard recall ≥ 60%)")
+    print("\n✓ Quality band passed (acc 87–94%, soft≥80%, hard≥65%)")
 
 
 if __name__ == "__main__":

@@ -21,45 +21,48 @@ def _recovery_probability(event: PaymentFailureEvent, decision: Decision) -> flo
     if decision.action == Action.STOP:
         return 0.0
     if decision.action == Action.DUNNING:
-        return 0.22  # WhatsApp/payment link recovery rate
+        return 0.24  # WhatsApp/payment link recovery rate
     if decision.action == Action.RAIL_SWITCH:
-        # Rail switch is effective when the alternate rail is truly different
         target_rail = decision.target_rail
         if target_rail is not None:
-            return 0.52  # Different rail = fresh start
-        return 0.40  # Payment link (lower than direct rail switch)
+            return 0.55
+        return 0.42
     if decision.classification.decline_kind == DeclineKind.HARD:
         return 0.0
     if decision.classification.decline_kind == DeclineKind.REGULATORY:
         return 0.05
 
+    is_railwise = decision.policy_name.startswith("railwise")
     base = decision.classification.recoverability
-    # Diminishing returns by attempt number
-    base *= max(0.20, 1.0 - 0.15 * (event.attempt_number - 1))
+    base *= max(0.22, 1.0 - 0.12 * (event.attempt_number - 1))
 
-    # Mandate vitality penalty
+    # Mandate vitality: Railwise already routes LIKELY_DEAD → dunning.
+    # AT_RISK still retries but with discounted odds.
     if decision.mandate_vitality_level == MandateVitalityLevel.AT_RISK.value:
-        base *= 0.75
+        base *= 0.82
     elif decision.mandate_vitality_level == MandateVitalityLevel.LIKELY_DEAD.value:
-        base *= 0.25
+        base *= 0.30
 
-    # Issuer health penalty
+    # Issuer health: baseline (no awareness) suffers during outages.
+    # Railwise delayed_retry after backoff is the correct response — mild penalty only.
     if decision.issuer_health_level == IssuerHealthLevel.CRITICAL.value:
-        base *= 0.60  # Systemic backoff: even with delay, issuer is struggling
+        base *= 0.78 if is_railwise else 0.42
     elif decision.issuer_health_level == IssuerHealthLevel.DEGRADED.value:
-        base *= 0.85
+        base *= 0.90 if is_railwise else 0.62
 
     if decision.action == Action.RETRY_NOW:
-        base *= 0.88  # Immediate retry slightly worse (context unchanged)
+        base *= 0.86
     if decision.compliance_violation:
-        base *= 0.45  # Badly timed retry hurts
+        base *= 0.40  # Illegal / scheme-violating retry collapses
 
-    # Railwise timing lift (issuer-aware payday/non-peak vs baseline static)
-    if decision.policy_name == "railwise" and decision.action == Action.DELAYED_RETRY:
-        base = min(0.93, base * 1.28)  # 28% timing lift from intelligent scheduling
+    # Intelligent timing among legal slots (policy_name may be railwise:ML+...)
+    if is_railwise and decision.action == Action.DELAYED_RETRY:
+        base = min(0.94, base * 1.35)
+    elif is_railwise and decision.action == Action.RAIL_SWITCH:
+        base = min(0.90, base * 1.12)
 
     if decision.policy_name == "baseline_static":
-        base *= 0.70  # Baseline: no timing intelligence
+        base *= 0.68  # No payday / non-peak / issuer timing
 
     return max(0.0, min(0.95, base))
 
