@@ -74,8 +74,31 @@ type EdgeCase = {
   id: string
   title: string
   notes: string
-  fixture: Record<string, unknown>
-  decision: { action: string; classification: { recoverability: number; source: string } }
+  expected_action?: string
+  expected_constraint?: string | null
+  fixture: Record<string, unknown> & {
+    method?: string
+    amount?: number
+    issuer_bank?: string
+    attempt_number?: number
+    error?: { code?: string; iso_code?: string }
+  }
+  decision: {
+    action: string
+    delay_minutes?: number | null
+    classification?: {
+      decline_kind?: string
+      recoverability?: number
+      source?: string
+      feature_importance?: Record<string, number>
+    }
+    constraint_hits?: Array<{ code: string; message: string }>
+    reason_chain?: string[]
+    execution_result?: string
+    recovered_amount_paise?: number
+    issuer_health_level?: string
+    mandate_vitality_level?: string
+  }
 }
 
 type SandboxCompare = {
@@ -141,9 +164,29 @@ export default function App() {
   const [loading, setLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [aiUsage, setAiUsage] = useState<Array<{ name: string; uses_ai: boolean; why: string }>>([])
+  const [edgesError, setEdgesError] = useState<string | null>(null)
+
+  async function loadEdges() {
+    setLoading('edges')
+    setEdgesError(null)
+    try {
+      const res = await fetch(`${API}/edge-cases`)
+      if (!res.ok) throw new Error(`Edge cases failed (${res.status}). Is the backend on :8000?`)
+      const data = await res.json()
+      const list = Array.isArray(data.edge_cases) ? data.edge_cases : []
+      setEdgeCases(list)
+      if (!list.length) setEdgesError('No edge cases returned from API')
+      else if (!selectedEdge && list[0]) setSelectedEdge(list[0])
+    } catch (e) {
+      setEdgeCases([])
+      setEdgesError(e instanceof Error ? e.message : 'Failed to load edge cases. Is the backend on :8000?')
+    } finally {
+      setLoading(null)
+    }
+  }
 
   useEffect(() => {
-    fetch(`${API}/edge-cases`).then((r) => r.json()).then((d) => setEdgeCases(d.edge_cases || [])).catch(() => {})
+    loadEdges()
     fetch(`${API}/batch/latest`).then((r) => r.json()).then((d) => d?.railwise && setBatch(d)).catch(() => {})
     fetch(`${API}/ai/usage`).then((r) => r.json()).then((d) => setAiUsage(d.layers || [])).catch(() => {})
     fetch(`${API}/model/training/latest`)
@@ -151,6 +194,13 @@ export default function App() {
       .then((d) => { if (hasValidTraining(d)) setTraining(d) })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (view === 'edges' && edgeCases.length === 0 && !edgesError) {
+      loadEdges()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view])
 
   useEffect(() => {
     if (selectedEdge && view === 'sandbox') {
@@ -193,7 +243,7 @@ export default function App() {
       const res = await fetch(`${API}/model/train`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ train_seed: 7, n_train: 3000, n_test: 600, stability_runs: withStability ? 5 : 0 }),
+        body: JSON.stringify({ train_seed: 7, n_train: 6000, n_test: 1000, stability_runs: withStability ? 5 : 0 }),
       })
       if (!res.ok) {
         const err = await res.text()
@@ -203,7 +253,7 @@ export default function App() {
       if (!hasValidTraining(data)) throw new Error('Training returned invalid metrics')
       setTraining(data)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Training failed — is backend running on :8000?')
+      setError(e instanceof Error ? e.message : 'Training failed. Is the backend running on :8000?')
     } finally {
       setLoading(null)
     }
@@ -298,6 +348,11 @@ export default function App() {
                 {loading === 'train' ? 'Training…' : 'Train Model Live'}
               </button>
             )}
+            {view === 'edges' && (
+              <button className="btn-primary" disabled={loading === 'edges'} onClick={loadEdges}>
+                {loading === 'edges' ? 'Loading…' : 'Reload edge cases'}
+              </button>
+            )}
           </div>
         </header>
 
@@ -358,8 +413,7 @@ export default function App() {
         {view === 'sandbox' && (
           <div className="view-content sandbox-layout">
             <section className="card toggles-card">
-              <h2>Railwise Blocks — toggle on/off</h2>
-              <p className="muted">Turn layers off to see how decisions change in real time.</p>
+              <h2>Engine layers</h2>
               <div className="toggle-grid">
                 <Toggle label="ML Model" sub="Ambiguous decline classifier" on={toggles.use_ml_model} onChange={() => toggle('use_ml_model')} />
                 <Toggle label="Compliance Blocks" sub="NPCI/RBI hard gate" on={toggles.use_compliance_blocks} onChange={() => toggle('use_compliance_blocks')} />
@@ -368,7 +422,7 @@ export default function App() {
                 <Toggle label="Timing AI" sub="Payday / non-peak slots" on={toggles.use_timing_ai} onChange={() => toggle('use_timing_ai')} />
               </div>
               <button className="btn-secondary" onClick={runAblation} disabled={!!loading}>
-                {loading === 'ablation' ? 'Running batch ablation…' : 'Run Full Ablation Study (200 events)'}
+                {loading === 'ablation' ? 'Running ablation…' : 'Run ablation (200 events)'}
               </button>
             </section>
 
@@ -384,13 +438,29 @@ export default function App() {
                 </div>
               </section>
 
-              {sandboxResult && (
+              {sandboxResult?.full_railwise && sandboxResult?.your_config && (
                 <section className="card compare-card">
                   <h2>Decision Comparison</h2>
-                  {sandboxResult.action_changed && <div className="alert alert-warn">Action changed when toggles modified!</div>}
+                  {sandboxResult.action_changed && <div className="alert alert-warn">Action changed after a layer was toggled.</div>}
                   <div className="compare-columns">
-                    <CompareCol title="Full Railwise" action={sandboxResult.full_railwise.action} recov={sandboxResult.full_railwise.classification.recoverability} source={sandboxResult.full_railwise.classification.source} constraints={sandboxResult.full_railwise.constraint_hits} chain={sandboxResult.full_railwise.reason_chain} highlight />
-                    <CompareCol title="Your Config" action={sandboxResult.your_config.action} recov={sandboxResult.your_config.classification.recoverability} source={sandboxResult.your_config.classification.source} constraints={sandboxResult.your_config.constraint_hits} chain={sandboxResult.your_config.reason_chain} changed={sandboxResult.action_changed} />
+                    <CompareCol
+                      title="Full Railwise"
+                      action={sandboxResult.full_railwise.action}
+                      recov={sandboxResult.full_railwise.classification?.recoverability ?? 0}
+                      source={sandboxResult.full_railwise.classification?.source || '—'}
+                      constraints={sandboxResult.full_railwise.constraint_hits || []}
+                      chain={sandboxResult.full_railwise.reason_chain || []}
+                      highlight
+                    />
+                    <CompareCol
+                      title="Your Config"
+                      action={sandboxResult.your_config.action}
+                      recov={sandboxResult.your_config.classification?.recoverability ?? 0}
+                      source={sandboxResult.your_config.classification?.source || '—'}
+                      constraints={sandboxResult.your_config.constraint_hits || []}
+                      chain={sandboxResult.your_config.reason_chain || []}
+                      changed={sandboxResult.action_changed}
+                    />
                   </div>
                 </section>
               )}
@@ -447,7 +517,7 @@ export default function App() {
                 </section>
               </>
             ) : (
-              <EmptyState message="Run 30-seed stability to prove consistent lift with minimal fluctuation" action={runStability} actionLabel="Run Stability" />
+              <EmptyState message="Run 30 seeds to measure lift variance." action={runStability} actionLabel="Run Stability" />
             )}
           </div>
         )}
@@ -456,15 +526,15 @@ export default function App() {
         {view === 'model' && (
           <div className="view-content">
             {loading === 'train' && (
-              <div className="alert alert-warn">Training model… this takes a few seconds (5 stability seeds).</div>
+              <div className="alert alert-warn">Training across 5 seeds…</div>
             )}
             {hasValidTraining(training) ? (
               <>
                 <div className="kpi-grid">
                   <KpiCard label="Accuracy" value={pct(training.metrics.accuracy)} delta="held-out test" positive={training.metrics.accuracy >= 0.85} />
-                  <KpiCard label="Soft Recall" value={pct(training.metrics.soft_recall)} delta="don't miss recoverable" positive />
-                  <KpiCard label="Hard Recall" value={pct(training.metrics.hard_recall)} delta="don't waste retries" positive />
-                  <KpiCard label="Quality Gate" value={training.quality_passed ? 'PASSED' : 'FAILED'} delta="≥72% acc, ≥60% hard recall" positive={training.quality_passed} />
+                  <KpiCard label="Soft Recall" value={pct(training.metrics.soft_recall)} delta="recoverable declines" positive />
+                  <KpiCard label="Hard Recall" value={pct(training.metrics.hard_recall)} delta="non-retryable declines" positive />
+                  <KpiCard label="Quality Gate" value={training.quality_passed ? 'PASSED' : 'FAILED'} delta="acc 87 to 94%, hard recall ≥ 65%" positive={training.quality_passed} />
                 </div>
 
                 <div className="two-col">
@@ -483,7 +553,7 @@ export default function App() {
                     </div>
                   </section>
                   <section className="card">
-                    <h2>Feature Weights (interpretable)</h2>
+                    <h2>Feature weights</h2>
                     <div className="weight-list">
                       {(training.feature_weights || []).map((fw) => (
                         <div key={fw.feature} className="weight-row">
@@ -514,7 +584,7 @@ export default function App() {
                 )}
 
                 <section className="card">
-                  <h2>Where AI is used (one-liners)</h2>
+                  <h2>Where AI is used</h2>
                   <div className="ai-grid">
                     {aiUsage.map((layer) => (
                       <div key={layer.name} className={`ai-card ${layer.uses_ai ? 'ai-yes' : 'ai-no'}`}>
@@ -535,22 +605,168 @@ export default function App() {
         {/* EDGES */}
         {view === 'edges' && (
           <div className="view-content">
-            <div className="failure-grid large">
-              {edgeCases.map((ec) => (
-                <div key={ec.id} className="failure-card edge-card" onClick={() => { setView('sandbox'); selectEdge(ec) }}>
-                  <div className="fc-header">
-                    <span className="fc-rail">{(ec.fixture.method as string || 'card').toUpperCase()}</span>
-                    <span className={actionClass(ec.decision.action)}>{ec.decision.action}</span>
+            {edgesError && (
+              <div className="alert alert-error" style={{ margin: '0 0 16px' }}>
+                {edgesError}
+                <button className="btn-secondary" style={{ marginLeft: 12, width: 'auto' }} onClick={loadEdges}>
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {!edgesError && edgeCases.length === 0 && (
+              <EmptyState
+                message={loading === 'edges' ? 'Loading edge cases…' : 'Edge cases not loaded yet'}
+                action={loadEdges}
+                actionLabel="Load edge cases"
+              />
+            )}
+
+            {edgeCases.length > 0 && (
+              <div className="edges-layout">
+                <section className="card edges-list-panel">
+                  <h2>Named fixtures ({edgeCases.length})</h2>
+                  <div className="edges-scroll">
+                    {edgeCases.map((ec) => {
+                      const recov = ec.decision?.classification?.recoverability
+                      return (
+                        <button
+                          key={ec.id}
+                          type="button"
+                          className={`edge-row ${selectedEdge?.id === ec.id ? 'selected' : ''}`}
+                          onClick={() => setSelectedEdge(ec)}
+                        >
+                          <div className="edge-row-top">
+                            <span className="fc-rail">{(ec.fixture?.method || 'card').toUpperCase()}</span>
+                            <span className={actionClass(ec.decision?.action || 'stop')}>{ec.decision?.action || '—'}</span>
+                          </div>
+                          <strong>{ec.title}</strong>
+                          <span className="edge-row-meta">
+                            {typeof recov === 'number' ? `recov ${recov.toFixed(2)}` : 'recov —'}
+                            {' · '}
+                            {ec.decision?.classification?.source || '—'}
+                          </span>
+                        </button>
+                      )
+                    })}
                   </div>
-                  <div className="fc-title">{ec.title}</div>
-                  <div className="fc-meta">{ec.notes}</div>
-                  <div className="fc-footer">
-                    <span>recov {ec.decision.classification.recoverability.toFixed(2)}</span>
-                    <span>{ec.decision.classification.source}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
+                </section>
+
+                <section className="card edges-detail-panel">
+                  {!selectedEdge && <div className="empty-state"><p>Select an edge case</p></div>}
+                  {selectedEdge && (
+                    <>
+                      <div className="edges-detail-head">
+                        <div>
+                          <p className="product-eyebrow">{selectedEdge.id}</p>
+                          <h2>{selectedEdge.title}</h2>
+                          <p className="muted">{selectedEdge.notes}</p>
+                        </div>
+                        <span className={actionClass(selectedEdge.decision?.action || 'stop')}>
+                          {selectedEdge.decision?.action}
+                        </span>
+                      </div>
+
+                      <div className="fail-meta" style={{ marginTop: 16 }}>
+                        <div>
+                          <span>Rail</span>
+                          <strong>{(selectedEdge.fixture?.method || 'card').toUpperCase()}</strong>
+                        </div>
+                        <div>
+                          <span>Issuer</span>
+                          <strong>{String(selectedEdge.fixture?.issuer_bank || '—').toUpperCase()}</strong>
+                        </div>
+                        <div>
+                          <span>Decline</span>
+                          <strong>
+                            {selectedEdge.fixture?.error?.code || '—'}
+                            {selectedEdge.fixture?.error?.iso_code ? ` · ISO ${selectedEdge.fixture.error.iso_code}` : ''}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Amount</span>
+                          <strong>{inr(Number(selectedEdge.fixture?.amount || 0))}</strong>
+                        </div>
+                        <div>
+                          <span>Attempt</span>
+                          <strong>{String(selectedEdge.fixture?.attempt_number ?? '—')}</strong>
+                        </div>
+                        <div>
+                          <span>Expected</span>
+                          <strong>
+                            {selectedEdge.expected_action || '—'}
+                            {selectedEdge.expected_constraint ? ` · ${selectedEdge.expected_constraint}` : ''}
+                          </strong>
+                        </div>
+                      </div>
+
+                      <div className="path-metrics" style={{ marginTop: 14 }}>
+                        <div className="path-metric">
+                          <span>Kind</span>
+                          <strong>{selectedEdge.decision?.classification?.decline_kind || '—'}</strong>
+                        </div>
+                        <div className="path-metric">
+                          <span>Recoverability</span>
+                          <strong>
+                            {typeof selectedEdge.decision?.classification?.recoverability === 'number'
+                              ? selectedEdge.decision.classification.recoverability.toFixed(3)
+                              : '—'}
+                          </strong>
+                        </div>
+                        <div className="path-metric">
+                          <span>Source</span>
+                          <strong>{selectedEdge.decision?.classification?.source || '—'}</strong>
+                        </div>
+                        <div className="path-metric">
+                          <span>Delay</span>
+                          <strong>
+                            {selectedEdge.decision?.delay_minutes != null
+                              ? `${Math.round(selectedEdge.decision.delay_minutes)}m`
+                              : '—'}
+                          </strong>
+                        </div>
+                      </div>
+
+                      {(selectedEdge.decision?.constraint_hits || []).length > 0 && (
+                        <div style={{ marginTop: 16 }}>
+                          <h3 style={{ fontSize: '0.9rem', marginBottom: 8 }}>Constraints</h3>
+                          {(selectedEdge.decision?.constraint_hits || []).map((h) => (
+                            <div key={h.code} className="constraint-block">
+                              <strong>{h.code}</strong>
+                              <p>{h.message}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {(selectedEdge.decision?.reason_chain || []).length > 0 && (
+                        <div style={{ marginTop: 16 }}>
+                          <h3 style={{ fontSize: '0.9rem', marginBottom: 8 }}>Reason chain</h3>
+                          <ol className="reason-list">
+                            {(selectedEdge.decision?.reason_chain || []).map((step, i) => (
+                              <li key={`${step}-${i}`}>{step}</li>
+                            ))}
+                          </ol>
+                        </div>
+                      )}
+
+                      <div className="ws-nav" style={{ marginTop: 18 }}>
+                        <button
+                          className="btn-secondary"
+                          style={{ width: 'auto' }}
+                          onClick={() => {
+                            setView('sandbox')
+                            selectEdge(selectedEdge)
+                          }}
+                        >
+                          Open in Sandbox Lab
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </section>
+              </div>
+            )}
           </div>
         )}
       </main>

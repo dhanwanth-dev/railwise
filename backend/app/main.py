@@ -111,6 +111,126 @@ def _journey_event(rail: str, scenario: str) -> dict[str, Any]:
     return base
 
 
+def _decision_log(decision, event: dict[str, Any], *, actor: str) -> list[dict[str, Any]]:
+    """
+    Commit-history style explainability log.
+    Each entry: short hash id, title, body, kind (rules|ai|policy|execute), guideline.
+    Built from the live Decision — not canned story text.
+    """
+    import hashlib
+
+    COMPLIANCE = {
+        "upi_cooldown": "NPCI OC/215A — minimum re-presentation gap before next UPI AutoPay debit",
+        "attempt_budget_exhausted": "NPCI OC/215A — max 1 original + 3 retries per UPI presentation cycle",
+        "pre_debit_notification_failed": "RBI e-mandate Framework 2026 — 24h pre-debit notification required",
+        "token_lifecycle_action": "RBI CoFT — expired/revoked card token cannot be retried; re-tokenize",
+        "customer_cancelled_recurring": "ISO 8583 R0/R1 — customer stopped recurring; do not re-debit",
+        "hard_decline": "Scheme hard decline — stolen/lost/invalid; retries risk fines",
+        "velocity_limit": "ISO 61/65 — daily velocity/amount cap; wait for reset",
+        "amount_needs_customer_action": "RBI AFA threshold — amounts above ₹15k need customer auth",
+        "issuer_systemic_backoff": "Issuer TD spike — adaptive backoff prevents thundering herd",
+        "mandate_vitality_critical": "Mandate health critical — dunning beats wasted final retry",
+        "regulatory_block": "Regulatory / AFA block — customer action required",
+        "mandate_revoked": "Mandate revoked — no further AutoPay debits",
+        "kill_switch": "Operator kill switch — all retries halted",
+    }
+    iso = event.get("decline_iso_code") or (event.get("error") or {}).get("iso_code")
+    commits: list[dict[str, Any]] = []
+
+    def _hash(label: str) -> str:
+        raw = f"{actor}:{event.get('id')}:{label}:{decision.action.value}"
+        return hashlib.sha1(raw.encode()).hexdigest()[:7]
+
+    commits.append({
+        "id": _hash("ingest"),
+        "kind": "rules",
+        "title": f"Ingest {str(event.get('method', '?')).upper()} failure",
+        "body": (
+            f"{event.get('id')} · issuer={event.get('issuer_bank')} · "
+            f"decline={ (event.get('error') or {}).get('code') }"
+            + (f" (ISO {iso})" if iso else "")
+            + f" · attempt {event.get('attempt_number')}"
+        ),
+        "guideline": "Normalize Razorpay webhook / AutoPay presentation into a single failure object.",
+        "ai_used": False,
+    })
+
+    cls = decision.classification
+    ai = cls.source == "model"
+    commits.append({
+        "id": _hash("classify"),
+        "kind": "ai" if ai else "rules",
+        "title": f"Classify as {cls.decline_kind.value}",
+        "body": (
+            f"recoverability={cls.recoverability:.2f} · confidence={cls.confidence:.2f} · "
+            f"source={cls.source}"
+            + (f" · reasons={', '.join(cls.reason_codes[:3])}" if cls.reason_codes else "")
+        ),
+        "guideline": (
+            "Clear ISO/semantic codes use deterministic maps. "
+            "Only ambiguous codes (e.g. ISO 05 do_not_honor) use the logistic model."
+            if ai
+            else "Deterministic taxonomy — no model vote on clear soft/hard/regulatory codes."
+        ),
+        "ai_used": ai,
+        "feature_importance": cls.feature_importance if ai else {},
+    })
+
+    if decision.constraint_hits:
+        for i, hit in enumerate(decision.constraint_hits):
+            code = hit.code.value
+            commits.append({
+                "id": _hash(f"constraint_{i}_{code}"),
+                "kind": "rules",
+                "title": f"Constraint · {code}",
+                "body": hit.message,
+                "guideline": COMPLIANCE.get(code),
+                "ai_used": False,
+                "forced_action": hit.forced_action.value if hit.forced_action else None,
+            })
+    else:
+        commits.append({
+            "id": _hash("constraint_none"),
+            "kind": "rules",
+            "title": "Constraint gate clear",
+            "body": "No hard compliance force — policy may choose within the legal action set.",
+            "guideline": "Compliance ceilings always beat recoverability scores when a constraint fires.",
+            "ai_used": False,
+        })
+
+    delay = decision.delay_minutes
+    commits.append({
+        "id": _hash("policy"),
+        "kind": "policy",
+        "title": f"Decide · {decision.action.value}",
+        "body": (
+            (f"delay {delay:.0f} min · " if delay is not None else "")
+            + (f"target={decision.target_rail.value} · " if decision.target_rail else "")
+            + f"issuer_health={decision.issuer_health_level} · "
+            f"mandate_vitality={decision.mandate_vitality_level}"
+        ),
+        "guideline": (
+            "Timing ranks already-legal slots (payday / NPCI non-peak / issuer avoid hours). "
+            "It never overrides a compliance block."
+        ),
+        "ai_used": False,
+        "reason_chain": decision.reason_chain,
+    })
+
+    commits.append({
+        "id": _hash("execute"),
+        "kind": "execute",
+        "title": f"Outcome · {decision.execution_result or 'pending'}",
+        "body": (
+            f"recovered ₹{(decision.recovered_amount_paise or 0) / 100:,.0f} · "
+            f"actor={actor}"
+        ),
+        "guideline": "Simulated collection outcome for this presentation — deterministic per payment id.",
+        "ai_used": False,
+    })
+    return commits
+
+
 @app.post("/journey/run")
 def api_journey_run(body: JourneyRequest) -> dict:
     """
@@ -245,6 +365,8 @@ def api_journey_run(body: JourneyRequest) -> dict:
             "custom_recovered_paise": custom.recovered_amount_paise,
         },
         "stages": stages,
+        "railwise_log": _decision_log(custom, event, actor="railwise"),
+        "baseline_log": _decision_log(baseline, event, actor="baseline"),
         "failure_feed": feed,
         "batch_metrics": {
             "railwise": (_LATEST.get("railwise") if _LATEST else None),
@@ -278,8 +400,8 @@ class AblationRequest(BaseModel):
 
 class TrainRequest(BaseModel):
     train_seed: int = 7
-    n_train: int = Field(default=3000, ge=500, le=10000)
-    n_test: int = Field(default=600, ge=100, le=2000)
+    n_train: int = Field(default=6000, ge=500, le=10000)
+    n_test: int = Field(default=1000, ge=100, le=2000)
     stability_runs: int = Field(default=0, ge=0, le=10)
 
 
@@ -415,15 +537,15 @@ def _build_training_payload(
     result: dict,
     *,
     train_seed: int = 7,
-    n_train: int = 3000,
-    n_test: int = 600,
+    n_train: int = 6000,
+    n_test: int = 1000,
     stability: dict | None = None,
 ) -> dict:
     """Wrap raw run_training() output with audit trail for Model Lab UI."""
     metrics = result.get("metrics") or {}
     audit_trail = [
         {"step": "generate_samples", "detail": f"{n_train} train + {n_test} test (seed={train_seed})"},
-        {"step": "train_logistic_sgd", "detail": "60 epochs, L2=0.001, 15 features"},
+        {"step": "train_logistic_sgd", "detail": "100 epochs, class-balanced SGD, calibrated threshold"},
         {"step": "evaluate_test_set", "detail": f"accuracy={metrics.get('accuracy', 0):.1%}"},
         {"step": "quality_gate", "detail": "PASSED" if result.get("quality_passed") else "FAILED"},
         {"step": "persist_weights", "detail": result.get("model_path", "data/models/ambiguous_clf.json")},
@@ -478,12 +600,12 @@ def api_ai_usage() -> dict:
     """One-liner map of where AI is used (and where it is not)."""
     return {
         "layers": [
-            {"name": "Ambiguous decline classifier", "uses_ai": True, "why": "Same code do_not_honor means different things on SBI vs HDFC — model learns issuer patterns."},
-            {"name": "Recoverability score", "uses_ai": True, "why": "Tells policy how much to trust a retry — compliance still has final say."},
-            {"name": "Timing (payday / non-peak)", "uses_ai": False, "why": "Rule-based slot ranking inside legal windows — interpretable, not a neural net."},
-            {"name": "Issuer Health Monitor", "uses_ai": False, "why": "Sliding-window TD rate math — detects outages without ML."},
-            {"name": "Mandate Vitality Scorer", "uses_ai": False, "why": "Weighted rules on failure history — proactive dunning before mandate dies."},
-            {"name": "Hard constraint gate", "uses_ai": False, "why": "NPCI/RBI rules never get a model vote — compliance is absolute."},
+            {"name": "Ambiguous decline classifier", "uses_ai": True, "why": "ISO 05 do_not_honor means different things on SBI vs HDFC. The model learns issuer and history patterns."},
+            {"name": "Recoverability score", "uses_ai": True, "why": "Scores how much to trust a retry. Compliance still has the final say."},
+            {"name": "Timing (payday / non-peak)", "uses_ai": False, "why": "Ranks already-legal retry slots. Interpretable rules, not a neural net."},
+            {"name": "Issuer Health Monitor", "uses_ai": False, "why": "Sliding-window technical decline rate. Detects issuer outages without ML."},
+            {"name": "Mandate Vitality Scorer", "uses_ai": False, "why": "Weighted rules on failure history. Escalates dying mandates to dunning."},
+            {"name": "Hard constraint gate", "uses_ai": False, "why": "NPCI and RBI rules never get a model vote. Compliance is absolute."},
             {"name": "Kill switch", "uses_ai": False, "why": "Human emergency override only."},
         ],
         "rule": "AI only votes when decline reason is ambiguous AND compliance already allows retry.",
