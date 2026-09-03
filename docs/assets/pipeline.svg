@@ -6,37 +6,35 @@
     </linearGradient>
   </defs>
   <rect width="1100" height="220" rx="18" fill="url(#bg)"/>
-  <text x="32" y="38" fill="#94a3b8" font-family="Inter, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="1.4">RAILWISE DECISION PIPELINE</text>
-  <text x="32" y="60" fill="#e2e8f0" font-family="Inter, system-ui, sans-serif" font-size="15">Compliance decides first. AI votes only after the legal set is known.</text>
+  <text x="32" y="38" fill="#94a3b8" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="1.4">RAILWISE DECISION PIPELINE</text>
+  <text x="32" y="60" fill="#e2e8f0" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15">Compliance decides first. AI votes only after the legal set is known.</text>
 
-  <!-- boxes -->
-  <g font-family="Inter, system-ui, sans-serif" text-anchor="middle">
+  <g font-family="ui-sans-serif, system-ui, sans-serif" text-anchor="middle">
     <rect x="28" y="92" width="150" height="78" rx="12" fill="#0f766e"/>
-    <text x="103" y="126" fill="#fff" font-size="14" font-weight="700">1. Ingest</text>
+    <text x="103" y="126" fill="#ffffff" font-size="14" font-weight="700">1. Ingest</text>
     <text x="103" y="146" fill="#ccfbf1" font-size="11">UPI / card / ISO</text>
 
     <rect x="202" y="92" width="150" height="78" rx="12" fill="#1d4ed8"/>
-    <text x="277" y="126" fill="#fff" font-size="14" font-weight="700">2. Classify</text>
+    <text x="277" y="126" fill="#ffffff" font-size="14" font-weight="700">2. Classify</text>
     <text x="277" y="146" fill="#dbeafe" font-size="11">Rules, then model</text>
 
     <rect x="376" y="92" width="150" height="78" rx="12" fill="#b45309"/>
-    <text x="451" y="126" fill="#fff" font-size="14" font-weight="700">3. Constraints</text>
+    <text x="451" y="126" fill="#ffffff" font-size="14" font-weight="700">3. Constraints</text>
     <text x="451" y="146" fill="#ffedd5" font-size="11">NPCI / RBI hard gate</text>
 
     <rect x="550" y="92" width="150" height="78" rx="12" fill="#0e7490"/>
-    <text x="625" y="126" fill="#fff" font-size="14" font-weight="700">4. Policy</text>
+    <text x="625" y="126" fill="#ffffff" font-size="14" font-weight="700">4. Policy</text>
     <text x="625" y="146" fill="#cffafe" font-size="11">Legal action only</text>
 
     <rect x="724" y="92" width="150" height="78" rx="12" fill="#047857"/>
-    <text x="799" y="126" fill="#fff" font-size="14" font-weight="700">5. Execute</text>
+    <text x="799" y="126" fill="#ffffff" font-size="14" font-weight="700">5. Execute</text>
     <text x="799" y="146" fill="#d1fae5" font-size="11">Simulated collect</text>
 
     <rect x="898" y="92" width="174" height="78" rx="12" fill="#334155"/>
-    <text x="985" y="126" fill="#fff" font-size="14" font-weight="700">6. Audit</text>
+    <text x="985" y="126" fill="#ffffff" font-size="14" font-weight="700">6. Audit</text>
     <text x="985" y="146" fill="#e2e8f0" font-size="11">Commit-style log</text>
   </g>
 
-  <!-- arrows -->
   <g fill="#5eead4">
     <polygon points="182,131 198,131 198,125 210,135 198,145 198,139 182,139"/>
     <polygon points="356,131 372,131 372,125 384,135 372,145 372,139 356,139"/>

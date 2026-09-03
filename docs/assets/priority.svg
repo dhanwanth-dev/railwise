@@ -1,20 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 340" role="img" aria-label="Constraint priority order">
-  <rect width="1100" height="340" rx="18" fill="#0b1520"/>
-  <text x="36" y="40" fill="#5eead4" font-family="Inter, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="1.5">NON-NEGOTIABLE PRIORITY</text>
-  <text x="36" y="68" fill="#f8fafc" font-family="Inter, system-ui, sans-serif" font-size="20" font-weight="700">If a higher row fires, lower rows do not get a vote.</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 520" role="img" aria-label="Constraint priority order">
+  <rect width="1100" height="520" rx="18" fill="#0b1520"/>
+  <text x="36" y="40" fill="#5eead4" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="1.5">NON-NEGOTIABLE PRIORITY</text>
+  <text x="36" y="68" fill="#f8fafc" font-family="ui-sans-serif, system-ui, sans-serif" font-size="20" font-weight="700">If a higher row fires, lower rows do not get a vote.</text>
 
-  <g font-family="Inter, system-ui, sans-serif">
-    <rect x="36" y="96" width="1028" height="44" rx="10" fill="#7f1d1d"/>
-    <text x="56" y="124" fill="#fecaca" font-size="15" font-weight="700">1  Stop  ·  stolen, lost, revoked, kill switch</text>
+  <g font-family="ui-sans-serif, system-ui, sans-serif">
+    <rect x="36" y="96" width="1028" height="36" rx="8" fill="#7f1d1d"/>
+    <text x="56" y="120" fill="#fecaca" font-size="14" font-weight="700">1  Kill switch</text>
 
-    <rect x="36" y="148" width="1028" height="44" rx="10" fill="#9a3412"/>
-    <text x="56" y="176" fill="#ffedd5" font-size="15" font-weight="700">2  Dunning  ·  PDN miss, expired token, customer cancelled, dead mandate</text>
+    <rect x="36" y="140" width="1028" height="36" rx="8" fill="#7f1d1d"/>
+    <text x="56" y="164" fill="#fecaca" font-size="14" font-weight="700">2  Mandate revoked</text>
 
-    <rect x="36" y="200" width="1028" height="44" rx="10" fill="#1e3a8a"/>
-    <text x="56" y="228" fill="#dbeafe" font-size="15" font-weight="700">3  Delay or switch  ·  UPI cooldown, attempt budget, issuer outage, velocity</text>
+    <rect x="36" y="184" width="1028" height="36" rx="8" fill="#9a3412"/>
+    <text x="56" y="208" fill="#ffedd5" font-size="14" font-weight="700">3  Token lifecycle (RBI CoFT)</text>
 
-    <rect x="36" y="252" width="1028" height="44" rx="10" fill="#134e4a"/>
-    <text x="56" y="280" fill="#ccfbf1" font-size="15" font-weight="700">4  Recoverability and timing  ·  only inside the remaining legal set</text>
+    <rect x="36" y="228" width="1028" height="36" rx="8" fill="#9a3412"/>
+    <text x="56" y="252" fill="#ffedd5" font-size="14" font-weight="700">4  Regulatory block / AFA  |  5  Customer cancelled (ISO R0/R1)  |  6  Pre-debit notification missing</text>
+
+    <rect x="36" y="272" width="1028" height="36" rx="8" fill="#7f1d1d"/>
+    <text x="56" y="296" fill="#fecaca" font-size="14" font-weight="700">7  Hard decline (ISO 41 / 43 / 54 / 62)</text>
+
+    <rect x="36" y="316" width="1028" height="36" rx="8" fill="#1e3a8a"/>
+    <text x="56" y="340" fill="#dbeafe" font-size="14" font-weight="700">8  Attempt budget exhausted  |  9  UPI cooldown (20 min)  |  10  Velocity limit</text>
+
+    <rect x="36" y="360" width="1028" height="36" rx="8" fill="#1e3a8a"/>
+    <text x="56" y="384" fill="#dbeafe" font-size="14" font-weight="700">11  Amount above Rs 15,000 AFA threshold</text>
+
+    <rect x="36" y="404" width="1028" height="36" rx="8" fill="#4338ca"/>
+    <text x="56" y="428" fill="#e0e7ff" font-size="14" font-weight="700">12  Issuer systemic backoff  |  13  Mandate vitality critical</text>
   </g>
-  <text x="36" y="320" fill="#94a3b8" font-family="Inter, system-ui, sans-serif" font-size="13">This is why turning compliance off can raise recovery while creating wasted hard retries.</text>
+
+  <text x="36" y="480" fill="#94a3b8" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13">Compliance always beats recoverability. Turning the gate off can raise recovery while creating wasted hard retries.</text>
 </svg>

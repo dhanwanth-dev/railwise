@@ -61,27 +61,9 @@ Railwise does not replace that work. It deepens the **decision** after a failure
 
 One failed payment enters. Six stages run. The output is a bounded action plus a commit-style audit log.
 
-```mermaid
-flowchart TD
-    A["Failed AutoPay / Card Debit"] --> B["Normalize rail, issuer, ISO code, attempt number"]
-    B --> C{"Clear decline code?"}
-    C -- "Hard / NSF / Regulatory" --> D["Deterministic classification"]
-    C -- "Ambiguous (ISO 05, etc.)" --> E["Logistic model · 15 features"]
-    D --> F["Constraint Gate · 13 NPCI / RBI ceilings"]
-    E --> F
-    F -- "Constraint fires" --> G["Forced: STOP / DUNNING / DELAY / SWITCH"]
-    F -- "No constraint" --> H["Policy + legal timing slot"]
-    H --> I["Simulate collection"]
-    G --> I
-    I --> J["Append-only audit log"]
-
-    style F fill:#b45309,color:#fff,stroke:#92400e
-    style E fill:#1d4ed8,color:#fff,stroke:#1e40af
-    style D fill:#0f766e,color:#fff,stroke:#065f46
-    style G fill:#991b1b,color:#fff,stroke:#7f1d1d
-    style H fill:#0e7490,color:#fff,stroke:#155e75
-    style J fill:#4338ca,color:#fff,stroke:#3730a3
-```
+<p align="center">
+  <img src="docs/assets/decision-flow.svg" alt="How a single failure is decided" width="100%" />
+</p>
 
 | Stage | What it does | Uses AI? |
 |-------|-------------|----------|
@@ -97,36 +79,6 @@ flowchart TD
 ### Constraint Priority Order
 
 These 13 constraints are evaluated in strict order. A higher constraint always overrides a lower one.
-
-```mermaid
-graph TD
-    K["1 · Kill switch"] --> MR["2 · Mandate revoked"]
-    MR --> TL["3 · Token lifecycle · CoFT"]
-    TL --> RB["4 · Regulatory block · RBI AFA"]
-    RB --> CC["5 · Customer cancelled · ISO R0/R1"]
-    CC --> PDN["6 · Pre-debit notification missing"]
-    PDN --> HD["7 · Hard decline · ISO 41/43/54/62"]
-    HD --> AB["8 · Attempt budget exhausted"]
-    AB --> UC["9 · UPI cooldown · 20 min gap"]
-    UC --> VL["10 · Velocity limit · ISO 61/65"]
-    VL --> AFA["11 · Amount above ₹15k AFA threshold"]
-    AFA --> ISB["12 · Issuer systemic backoff"]
-    ISB --> MVC["13 · Mandate vitality critical"]
-
-    style K fill:#991b1b,color:#fff
-    style MR fill:#991b1b,color:#fff
-    style TL fill:#b45309,color:#fff
-    style RB fill:#b45309,color:#fff
-    style CC fill:#b45309,color:#fff
-    style PDN fill:#b45309,color:#fff
-    style HD fill:#991b1b,color:#fff
-    style AB fill:#0369a1,color:#fff
-    style UC fill:#0369a1,color:#fff
-    style VL fill:#0369a1,color:#fff
-    style AFA fill:#0369a1,color:#fff
-    style ISB fill:#4338ca,color:#fff
-    style MVC fill:#4338ca,color:#fff
-```
 
 <p align="center">
   <img src="docs/assets/priority.svg" alt="Constraint priority tiers" width="100%" />
@@ -240,16 +192,9 @@ Turning a layer off is the honest test of whether it earns its place.
 
 The row that matters most: **removing compliance raises the recovery number while producing 7 hard-decline wasted retries.** A higher number with wasted retries is not a win.
 
-```mermaid
-flowchart LR
-    A["Full Engine"] -- "remove ML" --> B["Still legal, lower recovery"]
-    A -- "remove compliance" --> C["Higher recovery, but hard waste > 0"]
-    A -- "remove issuer health" --> D["No cross-customer backoff"]
-    style A fill:#0f766e,color:#fff
-    style C fill:#991b1b,color:#fff
-    style B fill:#6b7280,color:#fff
-    style D fill:#6b7280,color:#fff
-```
+<p align="center">
+  <img src="docs/assets/ablation.svg" alt="Ablation: what happens when layers are removed" width="100%" />
+</p>
 
 ---
 

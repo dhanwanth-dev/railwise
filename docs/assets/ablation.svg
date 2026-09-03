@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 220" role="img" aria-label="Ablation: what happens when layers are removed">
+  <rect width="1100" height="220" rx="18" fill="#0b1520"/>
+  <text x="36" y="40" fill="#5eead4" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="1.4">ABLATION</text>
+  <text x="36" y="66" fill="#f8fafc" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="700">What happens when you turn a layer off</text>
+
+  <g font-family="ui-sans-serif, system-ui, sans-serif" text-anchor="middle">
+    <rect x="36" y="100" width="200" height="70" rx="12" fill="#0f766e"/>
+    <text x="136" y="132" fill="#fff" font-size="14" font-weight="700">Full engine</text>
+    <text x="136" y="152" fill="#ccfbf1" font-size="12">legal + best recovery</text>
+
+    <rect x="300" y="100" width="220" height="70" rx="12" fill="#475569"/>
+    <text x="410" y="132" fill="#fff" font-size="14" font-weight="700">No ML</text>
+    <text x="410" y="152" fill="#e2e8f0" font-size="12">still legal, lower recovery</text>
+
+    <rect x="560" y="100" width="240" height="70" rx="12" fill="#991b1b"/>
+    <text x="680" y="132" fill="#fff" font-size="14" font-weight="700">No compliance</text>
+    <text x="680" y="152" fill="#fecaca" font-size="12">higher recovery, hard waste &gt; 0</text>
+
+    <rect x="840" y="100" width="220" height="70" rx="12" fill="#475569"/>
+    <text x="950" y="132" fill="#fff" font-size="14" font-weight="700">No issuer health</text>
+    <text x="950" y="152" fill="#e2e8f0" font-size="12">no cross-customer backoff</text>
+  </g>
+</svg>
