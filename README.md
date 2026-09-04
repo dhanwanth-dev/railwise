@@ -31,7 +31,21 @@ Treating every `do_not_honor` the same treats SBI and HDFC as the same bank. The
 
 <br />
 
-[Getting Started](#getting-started) · [Architecture](#architecture) · [Measured Results](#measured-results) · [Edge Cases](#edge-cases) · [References](#references)
+[Pitch Video](#pitch-video) · [Getting Started](#getting-started) · [Architecture](#architecture) · [Measured Results](#measured-results) · [Edge Cases](#edge-cases) · [References](#references)
+
+</div>
+
+---
+
+## Pitch Video
+
+<div align="center">
+
+[![Railwise pitch video](https://img.youtube.com/vi/FWaIPVz9_rM/maxresdefault.jpg)](https://www.youtube.com/watch?v=FWaIPVz9_rM)
+
+**[▶ Watch the pitch on YouTube](https://www.youtube.com/watch?v=FWaIPVz9_rM)**
+
+Problem framing → live Recovery Journey → batch proof → pytest
 
 </div>
 
@@ -404,7 +418,7 @@ Primary sources used to design constraints and calibrate issuer behaviour:
 | [Demo Script](docs/DEMO_SCRIPT.md) | 5-minute pitch walkthrough |
 | [Security](docs/SECURITY.md) | Demo boundaries, idempotency, kill switch |
 
-Pitch video will be linked here once recorded.
+See **[Pitch Video](#pitch-video)** at the top of this README.
 
 ---
 
